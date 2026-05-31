@@ -1,1 +1,0 @@
-C:\Users\alama\Favorites\Projek\ kecil\FL\ studio\ EQ\target\release\audio_analyzer.exe: C:\Users\alama\Favorites\Projek\ kecil\FL\ studio\ EQ\src\lib.rs C:\Users\alama\Favorites\Projek\ kecil\FL\ studio\ EQ\src\main.rs
