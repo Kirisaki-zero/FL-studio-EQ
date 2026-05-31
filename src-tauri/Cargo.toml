@@ -1,0 +1,20 @@
+[package]
+name        = "audio_analyzer"
+version     = "0.1.0"
+edition     = "2021"
+description = "High-resolution audio signal analyzer with FFT and THD calculation"
+
+[dependencies]
+claxon   = "0.4"
+rustfft  = "6"
+cpal     = "0.15"
+num-complex = "0.4"
+biquad   = "0.4.2"
+tauri    = { version = "2.0.0", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[[bin]]
+name = "fl_eq_studio"
+path = "src/main.rs"

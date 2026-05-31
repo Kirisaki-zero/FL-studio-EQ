@@ -1,0 +1,12 @@
+{
+  "name": "fl_eq_studio",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite ui --port 5173",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "vite": "^5.0.0"
+  }
+}
