@@ -11,6 +11,11 @@ cpal     = "0.15"
 num-complex = "0.4"
 biquad   = "0.4.2"
 tauri    = { version = "2.0.0", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0.228", features = ["derive"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }

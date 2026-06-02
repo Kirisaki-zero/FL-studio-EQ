@@ -294,7 +294,7 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
     <div class="tbar-sub" id="topSub">7 bands · stereo · 44.1kHz</div>
   </div>
   <div style="margin-left: 20px;">
-    <button onclick="playTestAudio()" style="background:var(--acc);color:#fff;border:none;padding:5px 15px;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-weight:bold;font-size:12px;">PLAY TEST FLAC</button>
+    <button onclick="openFilePicker()" style="background:var(--acc);color:#fff;border:none;padding:5px 15px;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-weight:bold;font-size:12px;">PICK AUDIO FILE</button>
   </div>
   <div class="tbar-right">
     <div class="pill pill-on" id="bypassBtn" onclick="toggleBypass()">ACTIVE</div>
@@ -316,6 +316,7 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
   <div class="slbl">PARAMETRIC EQ · 7 BAND</div>
   <div class="eq-wrap">
     <div class="eq-header">
+      <div class="pill pill-off" id="eqLockBtn" onclick="toggleEQLock()" style="font-size:8px; padding:2px 6px; margin-right:5px;">UNLOCK</div>
       <span id="bandInfo">Band 4 · 1.0kHz · +3.0dB · Q 1.4</span>
       <div style="margin-left:auto;display:flex;gap:4px">
         <div class="mode-btn active" id="mPeak" style="color:var(--purple2)" onclick="setShapeMode('Peaking',this)">Peak</div>
@@ -725,6 +726,7 @@ let compBypassed=false;
 let oscFrozen=false, geqSmooth=false, specHold=false;
 let specMode='noise';
 let currentOctave=4;
+let eqLocked=false;
 
 // GONIOMETER STATE
 let gonioMode='dot';
@@ -761,17 +763,26 @@ function navClick(el,name){
 // ===========================
 // EQ CORE
 // ===========================
-function toggleBypass(){bypassed=!bypassed;const b=document.getElementById('bypassBtn');b.textContent=bypassed?'BYPASS':'ACTIVE';b.className='pill '+(bypassed?'pill-off':'pill-on');drawEQ();showToast(bypassed?'EQ dibypass':'EQ aktif');}
-function toggleLP(){lpMode=!lpMode;const b=document.getElementById('lpBtn');b.className='pill '+(lpMode?'pill-on':'pill-off');showToast(lpMode?'Linear Phase ON':'Linear Phase OFF');}
-function toggleMS(){msMode=!msMode;const b=document.getElementById('midSideBtn');b.className='pill '+(msMode?'pill-on':'pill-off');document.getElementById('vuHeadTxt').textContent=msMode?'Mid/Side metering':'Stereo metering aktif';showToast(msMode?'Mid/Side mode ON':'Stereo mode');}
+function toggleBypass(){if(eqLocked){showToast('EQ terkunci!');return;} bypassed=!bypassed;const b=document.getElementById('bypassBtn');b.textContent=bypassed?'BYPASS':'ACTIVE';b.className='pill '+(bypassed?'pill-off':'pill-on');drawEQ();showToast(bypassed?'EQ dibypass':'EQ aktif');}
+function toggleLP(){if(eqLocked){showToast('EQ terkunci!');return;} lpMode=!lpMode;const b=document.getElementById('lpBtn');b.className='pill '+(lpMode?'pill-on':'pill-off');showToast(lpMode?'Linear Phase ON':'Linear Phase OFF');}
+function toggleMS(){if(eqLocked){showToast('EQ terkunci!');return;} msMode=!msMode;const b=document.getElementById('midSideBtn');b.className='pill '+(msMode?'pill-on':'pill-off');document.getElementById('vuHeadTxt').textContent=msMode?'Mid/Side metering':'Stereo metering aktif';showToast(msMode?'Mid/Side mode ON':'Stereo mode');}
+function toggleEQLock(){
+  eqLocked=!eqLocked;
+  const b=document.getElementById('eqLockBtn');
+  b.className='pill '+(eqLocked?'pill-on':'pill-off');
+  b.textContent=eqLocked?'LOCKED':'UNLOCK';
+  if(eqLocked){b.style.borderColor='#f09595';b.style.color='#f09595';b.style.backgroundColor='#f0959520';}
+  else{b.style.borderColor='';b.style.color='';b.style.backgroundColor='';}
+  showToast(eqLocked?'EQ Dikunci':'EQ Dibuka');
+}
 
 function buildBstrip(){
   const strip=document.getElementById('bstrip');strip.innerHTML='';
   bands.forEach((b,i)=>{
     const nd=document.createElement('div');nd.className='bnode';
     nd.innerHTML=`<div class="bcircle" id="bc${i}" style="background:${b.color}${i===selB?'35':'18'};color:${b.color};${i===selB?'border-color:'+b.color:''};${b.muted?'opacity:.35':''}">${b.lbl}</div><div class="blbl">${fmtFreq(b.freq)}</div>`;
-    nd.onclick=()=>selectBand(i);
-    nd.ondblclick=()=>{bands[i].muted=!bands[i].muted;buildBstrip();drawEQ();showToast(bands[i].muted?b.lbl+' muted':b.lbl+' unmuted');};
+    nd.onclick=()=>{if(eqLocked){showToast('EQ terkunci!');return;} selectBand(i);};
+    nd.ondblclick=()=>{if(eqLocked){showToast('EQ terkunci!');return;} bands[i].muted=!bands[i].muted;buildBstrip();drawEQ();showToast(bands[i].muted?b.lbl+' muted':b.lbl+' unmuted');};
     strip.appendChild(nd);
   });
 }
@@ -792,11 +803,12 @@ function updateKnobs(){
 // Knob drag on kcard
 const kParams={freq:{min:20,max:20000,step:0.05,log:true},gain:{min:-15,max:15,step:0.1,log:false},q:{min:0.1,max:10,step:0.05,log:true},slope:{min:6,max:96,step:6,log:false}};
 document.querySelectorAll('.kcard').forEach(kc=>{
-  let sy=0,sv=0;
+  let sy=0,sv=0,kd=false;
   const param=kc.dataset.param;
   if(!param)return;
-  kc.addEventListener('pointerdown',e=>{sy=e.clientY;sv=bands[selB][param]||0;kc.setPointerCapture(e.pointerId);e.preventDefault();});
+  kc.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} kd=true; sy=e.clientY;sv=bands[selB][param]||0;kc.setPointerCapture(e.pointerId);e.preventDefault();});
   kc.addEventListener('pointermove',e=>{
+    if(!kd)return;
     if(!kc._dragging&&Math.abs(e.clientY-sy)<3)return;kc._dragging=true;
     const dy=sy-e.clientY,p=kParams[param];
     let nv;
@@ -812,11 +824,11 @@ document.querySelectorAll('.kcard').forEach(kc=>{
     bands[selB].freqDisp=fmtFreq(bands[selB].freq);
     updateKnobs();drawEQ();
   });
-  kc.addEventListener('pointerup',()=>{kc._dragging=false;});
+  kc.addEventListener('pointerup',()=>{kd=false;kc._dragging=false;});
 });
 
-function clickShape(el,name){document.querySelectorAll('.shbtn').forEach(b=>b.classList.remove('shsel'));el.classList.add('shsel');bands[selB].shape=name;drawEQ();showToast('Shape: '+name);}
-function setShapeMode(name,el){document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));el.classList.add('active');bands[selB].shape=name;document.querySelectorAll('.shbtn').forEach(b=>b.classList.toggle('shsel',b.textContent===name));drawEQ();showToast(name);}
+function clickShape(el,name){if(eqLocked){showToast('EQ terkunci!');return;} document.querySelectorAll('.shbtn').forEach(b=>b.classList.remove('shsel'));el.classList.add('shsel');bands[selB].shape=name;drawEQ();showToast('Shape: '+name);}
+function setShapeMode(name,el){if(eqLocked){showToast('EQ terkunci!');return;} document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));el.classList.add('active');bands[selB].shape=name;document.querySelectorAll('.shbtn').forEach(b=>b.classList.toggle('shsel',b.textContent===name));drawEQ();showToast(name);}
 
 // ===========================
 // EQ DRAW
@@ -904,7 +916,7 @@ function bandGain(b,freq){
 const eqCv=document.getElementById('eqc');let dragging=-1;
 function getEqPos(e){const r=eqCv.getBoundingClientRect();const touch=e.touches?e.touches[0]:e;return{x:(touch.clientX-r.left)*(eqCv.width/r.width),y:(touch.clientY-r.top)*(eqCv.height/r.height)};}
 function findNearest(x,y){let best=-1,bestD=999;bands.forEach((b,i)=>{const bx=freqToX(b.freq,eqCv.width);const by=eqCv.height/2-(b.gain/16)*(eqCv.height*0.45);const d=Math.hypot(bx-x,by-y);if(d<bestD){bestD=d;best=i;}});return bestD<28?best:-1;}
-eqCv.addEventListener('pointerdown',e=>{e.preventDefault();const p=getEqPos(e);dragging=findNearest(p.x,p.y);if(dragging>=0){selectBand(dragging);eqCv.setPointerCapture(e.pointerId);}});
+eqCv.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} e.preventDefault();const p=getEqPos(e);dragging=findNearest(p.x,p.y);if(dragging>=0){selectBand(dragging);eqCv.setPointerCapture(e.pointerId);}});
 eqCv.addEventListener('pointermove',e=>{if(dragging<0)return;e.preventDefault();const p=getEqPos(e);const b=bands[dragging];b.freq=Math.max(20,Math.min(20000,xToFreq(p.x,eqCv.width)));const gain=((eqCv.height/2-p.y)/(eqCv.height*0.45))*16;b.gain=Math.max(-15,Math.min(15,Math.round(gain*10)/10));updateKnobs();buildBstrip();drawEQ();});
 eqCv.addEventListener('pointerup',()=>dragging=-1);
 
@@ -952,62 +964,135 @@ function drawSpectrum(){
 // ===========================
 // VU METER
 // ===========================
-let vuPeakL=0,vuPeakR=0,vuPeakM=0,vuPeakS=0;
-let vuPhase=0;
-function resetVUPeaks(){vuPeakL=vuPeakR=vuPeakM=vuPeakS=0;showToast('VU peaks reset');}
-function animVU(){
-  vuPhase+=0.03;
-  const lv=0.5+0.35*Math.sin(vuPhase*1.1)+0.12*Math.random();
-  const rv=0.5+0.35*Math.sin(vuPhase*1.3+0.5)+0.12*Math.random();
-  const mv=(lv+rv)/2;const sv=Math.abs(lv-rv)*0.8;
-  const clamp=v=>Math.max(0,Math.min(1,v));
-  const lc=clamp(lv),rc=clamp(rv),mc=clamp(mv),sc=clamp(sv);
-  if(lc>vuPeakL)vuPeakL=lc;if(rc>vuPeakR)vuPeakR=rc;if(mc>vuPeakM)vuPeakM=mc;if(sc>vuPeakS)vuPeakS=sc;
-  function setVU(id,peakId,dbId,v,peak){
-    document.getElementById(id).style.height=(v*100)+'%';
-    document.getElementById(peakId).style.top=((1-peak)*100)+'%';
-    const db=20*Math.log10(Math.max(v,0.001));
-    document.getElementById(dbId).textContent=(db>0?'+':'')+db.toFixed(1);
-    // color
-    const el=document.getElementById(id);
-    if(v>0.9)el.style.background='linear-gradient(0deg,#5dcaa5,#ef9f27,#f09595)';
-    else if(v>0.7)el.style.background='linear-gradient(0deg,#5dcaa5,#ef9f27)';
-    else el.style.background='linear-gradient(0deg,#7dc459,#5dcaa5)';
+let vuPeakL=-100,vuPeakR=-100,vuPeakM=-100,vuPeakS=-100;
+let realL=-100,realR=-100,realM=-100,realS=-100;
+
+function resetVUPeaks(){vuPeakL=vuPeakR=vuPeakM=vuPeakS=-100;}
+
+// Polling interval 20ms
+let realOscL = [];
+let realOscR = [];
+
+setInterval(async () => {
+  if (window.__TAURI__) {
+    try {
+      const levels = await window.__TAURI__.core.invoke('get_meter_levels');
+      realL = levels[0];
+      realR = levels[1];
+      realM = levels[2];
+      realS = levels[3];
+      
+      if (!oscFrozen) {
+        const oscData = await window.__TAURI__.core.invoke('get_oscilloscope_data');
+        realOscL = oscData[0] || [];
+        realOscR = oscData[1] || [];
+      }
+    } catch(e){}
   }
-  setVU('vuL','vuLpeak','vuLdb',lc,vuPeakL);
-  setVU('vuR','vuRpeak','vuRdb',rc,vuPeakR);
-  setVU('vuM','vuMpeak','vuMdb',mc,vuPeakM);
-  setVU('vuS','vuSpeak','vuSdb',sc,vuPeakS);
+}, 20);
+
+function animVU(){
+  // Konversi dB (-60 sampai +6) ke persentase 0.0 - 1.0
+  const toPct = (db) => Math.max(0, Math.min(1, (db + 60) / 66));
+
+  if(realL > vuPeakL) vuPeakL = realL;
+  if(realR > vuPeakR) vuPeakR = realR;
+  if(realM > vuPeakM) vuPeakM = realM;
+  if(realS > vuPeakS) vuPeakS = realS;
+
+  function setVU(id, peakId, dbId, dbVal, dbPeak) {
+    const v = toPct(dbVal);
+    const p = toPct(dbPeak);
+    document.getElementById(id).style.height = (v * 100) + '%';
+    document.getElementById(peakId).style.top = ((1 - p) * 100) + '%';
+    
+    // Format text
+    const txt = dbVal <= -99.9 ? "-inf" : (dbVal > 0 ? '+' : '') + dbVal.toFixed(1);
+    document.getElementById(dbId).textContent = txt;
+
+    // color
+    const el = document.getElementById(id);
+    if(v > 0.9) el.style.background = 'linear-gradient(0deg,#5dcaa5,#ef9f27,#f09595)';
+    else if(v > 0.7) el.style.background = 'linear-gradient(0deg,#5dcaa5,#ef9f27)';
+    else el.style.background = 'linear-gradient(0deg,#7dc459,#5dcaa5)';
+  }
+
+  setVU('vuL', 'vuLpeak', 'vuLdb', realL, vuPeakL);
+  setVU('vuR', 'vuRpeak', 'vuRdb', realR, vuPeakR);
+  setVU('vuM', 'vuMpeak', 'vuMdb', realM, vuPeakM);
+  setVU('vuS', 'vuSpeak', 'vuSdb', realS, vuPeakS);
 }
 
 // ===========================
 // OSCILLOSCOPE
 // ===========================
-let oscPhase=0;
-function toggleOscFreeze(){oscFrozen=!oscFrozen;document.getElementById('oscFreezeBtn').className='pill '+(oscFrozen?'pill-on':'pill-off');showToast(oscFrozen?'Frozen':'Oscilloscope live');}
+let oscOffset = 0;
+let oscDragging = false;
+let oscStartX = 0;
+
+function toggleOscFreeze(){
+  oscFrozen=!oscFrozen;
+  document.getElementById('oscFreezeBtn').className='pill '+(oscFrozen?'pill-on':'pill-off');
+  showToast(oscFrozen?'Frozen':'Oscilloscope live');
+}
+
+// Drag Listeners for Phase Offset
+document.addEventListener('mousedown', (e) => {
+  if (e.target && e.target.id === 'oscCV') {
+    oscDragging = true;
+    oscStartX = e.clientX;
+  }
+});
+window.addEventListener('mouseup', () => { oscDragging = false; });
+window.addEventListener('mousemove', (e) => {
+  if (oscDragging) {
+    const dx = e.clientX - oscStartX;
+    oscOffset -= dx * 4; // drag sensitivity
+    if (oscOffset < 0) oscOffset = 0;
+    const maxOffset = Math.max(0, realOscL.length - 1024);
+    if (oscOffset > maxOffset) oscOffset = maxOffset;
+    oscStartX = e.clientX;
+  }
+});
+
 function drawOsc(){
   const cv=document.getElementById('oscCV');
-  const ctx=cv.getContext('2d');const W=cv.width,H=cv.height;
-  ctx.fillStyle='#0c0f19';ctx.fillRect(0,0,W,H);
-  if(!oscFrozen)oscPhase+=0.04;
+  const ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height;
+  ctx.fillStyle='#0c0f19';
+  ctx.fillRect(0,0,W,H);
+  
   ctx.strokeStyle='#252837';ctx.lineWidth=0.5;
   ctx.beginPath();ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
+
+  if (!realOscL || realOscL.length === 0) return;
+
+  const displaySamples = 1024;
+  const maxOffset = Math.max(0, realOscL.length - displaySamples);
+  let startIdx = Math.floor(Math.max(0, Math.min(maxOffset, oscOffset)));
+
   // L channel
+  ctx.strokeStyle='#85b7eb';ctx.lineWidth=1.5;
   ctx.beginPath();
-  for(let i=0;i<=W;i++){
-    const t=i/W*Math.PI*4+oscPhase;
-    const y=H/2+(Math.sin(t)+0.3*Math.sin(t*2.7+1)+0.1*Math.sin(t*5.3))*H*0.38;
-    i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
+  for(let i=0; i<=W; i++){
+    const sampleIdx = startIdx + Math.floor((i / W) * (displaySamples - 1));
+    const val = realOscL[sampleIdx] || 0;
+    const y = H/2 - (val * H/2 * 0.95);
+    i===0 ? ctx.moveTo(i,y) : ctx.lineTo(i,y);
   }
-  ctx.strokeStyle='#85b7eb80';ctx.lineWidth=1.5;ctx.stroke();
-  // R channel (offset)
+  ctx.stroke();
+
+  // R channel
+  ctx.strokeStyle='#ff8a65';ctx.lineWidth=1.5;
   ctx.beginPath();
-  for(let i=0;i<=W;i++){
-    const t=i/W*Math.PI*4+oscPhase+0.4;
-    const y=H/2+(Math.sin(t)+0.2*Math.sin(t*3.1+0.5)+0.15*Math.sin(t*6))*H*0.35;
-    i===0?ctx.moveTo(i,y):ctx.lineTo(i,y);
+  for(let i=0; i<=W; i++){
+    const sampleIdx = startIdx + Math.floor((i / W) * (displaySamples - 1));
+    const val = realOscR[sampleIdx] || 0;
+    const y = H/2 - (val * H/2 * 0.95);
+    i===0 ? ctx.moveTo(i,y) : ctx.lineTo(i,y);
   }
-  ctx.strokeStyle='#ff8a6560';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.stroke();
+
   ctx.fillStyle='#85b7eb';ctx.font='7px JetBrains Mono,monospace';ctx.fillText('L',3,10);
   ctx.fillStyle='#ff8a65';ctx.fillText('R',14,10);
 }
@@ -1042,7 +1127,7 @@ function drawEquo(){
 }
 function smoothPts(arr){return arr.map((v,i)=>{const s=arr.slice(Math.max(0,i-2),i+3);return s.reduce((a,b)=>a+b,0)/s.length;});}
 let equoDraw=false;
-equoCv.addEventListener('pointerdown',e=>{equoDraw=true;equoCv.setPointerCapture(e.pointerId);});
+equoCv.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} equoDraw=true;equoCv.setPointerCapture(e.pointerId);});
 equoCv.addEventListener('pointermove',e=>{if(!equoDraw)return;const r=equoCv.getBoundingClientRect();const x=(e.clientX-r.left)*(equoCv.width/r.width);const y=(e.clientY-r.top)*(equoCv.height/r.height);const idx=Math.round((x/equoCv.width)*(equoPts.length-1));if(idx>=0&&idx<equoPts.length)equoPts[idx]=Math.max(2,Math.min(equoCv.height-2,y));drawEquo();});
 equoCv.addEventListener('pointerup',()=>equoDraw=false);
 
@@ -1059,7 +1144,7 @@ function buildFaders(){
 <div class="ftrack" id="ft${fi}"><div class="ffill" style="height:${fillH}px;background:${f.color}55;bottom:${f.db<0?0:trackH/2}px"></div><div class="fthumb" style="top:${thumbY}px;background:${f.color}"></div></div>
 <div class="ffreq" style="font-size:7px">${['100','250','500','1k','2k','5k','10k'][fi]}</div>`;
     const track=col.querySelector('.ftrack');let fdrag=false,startY=0,startDb=f.db;
-    track.addEventListener('pointerdown',e=>{fdrag=true;startY=e.clientY;startDb=f.db;track.setPointerCapture(e.pointerId);e.stopPropagation();});
+    track.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} fdrag=true;startY=e.clientY;startDb=f.db;track.setPointerCapture(e.pointerId);e.stopPropagation();});
     track.addEventListener('pointermove',e=>{if(!fdrag)return;const dy=startY-e.clientY;f.db=Math.max(-15,Math.min(15,Math.round((startDb+dy/2.5)*10)/10));buildFaders();showToast(faderData[fi].db>0?'+'+faderData[fi].db+'dB':faderData[fi].db+'dB');});
     track.addEventListener('pointerup',()=>fdrag=false);
     row.appendChild(col);
@@ -1289,6 +1374,7 @@ function buildQuickPresets(){
   });
 }
 function applyPreset(i){
+  if(eqLocked){showToast('EQ terkunci!');return;}
   activePreset=i;const p=presets[i];
   bands.forEach((b,bi)=>{b.gain=p.gains[bi]||0;});
   buildBstrip();updateKnobs();drawEQ();buildPresetGrid();buildQuickPresets();
@@ -1296,9 +1382,9 @@ function applyPreset(i){
   showToast('Preset: '+p.name);
 }
 function saveCurrentPreset(){showToast('Preset tersimpan ✓ (simulasi)');}
-function randomizeEQ(){bands.forEach(b=>{b.gain=Math.round((Math.random()*20-10)*2)/2;});activePreset=-1;buildBstrip();updateKnobs();drawEQ();buildPresetGrid();buildQuickPresets();showToast('EQ diacak!');}
-function resetAllBands(){bands.forEach(b=>b.gain=0);activePreset=-1;buildBstrip();updateKnobs();drawEQ();buildPresetGrid();buildQuickPresets();showToast('Semua band direset');}
-function flattenEQ(){bands.forEach(b=>{b.gain=0;b.q=1.4;});buildBstrip();updateKnobs();drawEQ();showToast('EQ diratakan');}
+function randomizeEQ(){if(eqLocked){showToast('EQ terkunci!');return;} bands.forEach(b=>{b.gain=Math.round((Math.random()*20-10)*2)/2;});activePreset=-1;buildBstrip();updateKnobs();drawEQ();buildPresetGrid();buildQuickPresets();showToast('EQ diacak!');}
+function resetAllBands(){if(eqLocked){showToast('EQ terkunci!');return;} bands.forEach(b=>b.gain=0);activePreset=-1;buildBstrip();updateKnobs();drawEQ();buildPresetGrid();buildQuickPresets();showToast('Semua band direset');}
+function flattenEQ(){if(eqLocked){showToast('EQ terkunci!');return;} bands.forEach(b=>{b.gain=0;b.q=1.4;});buildBstrip();updateKnobs();drawEQ();showToast('EQ diratakan');}
 
 // ===========================
 // PLUGINS
@@ -1485,22 +1571,20 @@ function drawGoniometer(){
   ctx.textAlign='left';
 
   // ── generate new Lissajous points ───────────────────────────
-  gonioPhase+=0.055;
-  const baseFreq=1.0;
-  // simulate L/R from oscilloscope-like signal with slight detuning
-  const numNew=6;
-  for(let n=0;n<numNew;n++){
-    const t=gonioPhase+n*0.01;
-    const Lval= Math.sin(t*baseFreq)+0.28*Math.sin(t*2.97+1.1)+0.09*Math.sin(t*5.2)+0.04*(Math.random()-.5);
-    const Rval= Math.sin(t*baseFreq+0.38)+0.22*Math.sin(t*3.1+0.6)+0.12*Math.sin(t*6.1)+0.04*(Math.random()-.5);
-    // Rotate 45° → M/S axes map to canvas X/Y
-    const px=cx + ((Lval-Rval)/Math.SQRT2)*R*0.78;
-    const py=cy - ((Lval+Rval)/Math.SQRT2)*R*0.78;
+  if (!realOscL || realOscL.length === 0) return;
+  const numNew = 256; 
+  const startIdx = Math.max(0, realOscL.length - numNew);
+  
+  for(let i=0; i<numNew; i+=2) { // step by 2 to save CPU but get good spread
+    const Lval = realOscL[startIdx + i] || 0;
+    const Rval = realOscR[startIdx + i] || 0;
+    const px = cx + ((Rval - Lval) / Math.SQRT2) * R;
+    const py = cy - ((Rval + Lval) / Math.SQRT2) * R;
     gonioHistory.push({x:px,y:py,age:0});
   }
 
   // ── age & cull ───────────────────────────────────────────────
-  const maxAge=gonioMode==='line'?90:50;
+  const maxAge=gonioMode==='line'?15:8; // faster fade for real data to prevent clutter
   for(let i=gonioHistory.length-1;i>=0;i--){
     gonioHistory[i].age++;
     if(gonioHistory[i].age>maxAge)gonioHistory.splice(i,1);
@@ -1508,53 +1592,75 @@ function drawGoniometer(){
 
   // ── draw points ─────────────────────────────────────────────
   if(gonioMode==='line'&&gonioHistory.length>1){
-    // draw fading trail segments
     for(let i=1;i<gonioHistory.length;i++){
       const p=gonioHistory[i-1],q=gonioHistory[i];
-      const alpha=1-q.age/maxAge;
-      ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
-      ctx.strokeStyle=`rgba(93,202,165,${alpha*0.9})`;ctx.lineWidth=1;ctx.stroke();
+      if(p.age===0 && q.age===0){
+        const alpha=1-q.age/maxAge;
+        ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
+        ctx.strokeStyle=`rgba(93,202,165,${alpha*0.6})`;ctx.lineWidth=1;ctx.stroke();
+      }
     }
   } else if(gonioMode==='glow'){
     gonioHistory.forEach(pt=>{
       const alpha=1-pt.age/maxAge;
-      const rad=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,3.5);
+      const rad=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,4);
       rad.addColorStop(0,`rgba(93,202,165,${alpha})`);
       rad.addColorStop(1,'rgba(93,202,165,0)');
-      ctx.fillStyle=rad;ctx.beginPath();ctx.arc(pt.x,pt.y,3.5,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle=rad;ctx.beginPath();ctx.arc(pt.x,pt.y,4,0,Math.PI*2);ctx.fill();
     });
   } else {
     // dot mode
     gonioHistory.forEach(pt=>{
       const alpha=1-pt.age/maxAge;
-      ctx.fillStyle=`rgba(93,202,165,${alpha*0.85})`;
-      ctx.beginPath();ctx.arc(pt.x,pt.y,1.4,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle=`rgba(93,202,165,${alpha*0.8})`;
+      ctx.beginPath();ctx.arc(pt.x,pt.y,1.2,0,Math.PI*2);ctx.fill();
     });
   }
 
-  // ── clip to circle ───────────────────────────────────────────
-  // (already clipped visually by the round canvas border-radius)
+  // ── update stats (real data) ─────────────────────────────
+  let sumLR=0, sumL2=0, sumR2=0, sumM2=0, sumS2=0;
+  const N = realOscL.length;
+  for(let i=0; i<N; i++) {
+    const L = realOscL[i] || 0;
+    const R = realOscR[i] || 0;
+    sumLR += L * R;
+    sumL2 += L * L;
+    sumR2 += R * R;
+    const m = (L + R) / Math.SQRT2;
+    const s = (L - R) / Math.SQRT2;
+    sumM2 += m * m;
+    sumS2 += s * s;
+  }
 
-  // ── update stats (smooth drift) ─────────────────────────────
-  const corrTarget=0.6+0.35*Math.sin(gonioPhase*0.18)+0.05*(Math.random()-.5);
-  gonioCorrVal=gonioCorrVal*0.94+corrTarget*0.06;
-  const corrSign=gonioCorrVal>=0?'+':'';
-  document.getElementById('gonioCorr').textContent=corrSign+gonioCorrVal.toFixed(2);
-  const corrPct=((gonioCorrVal+1)/2*100);
-  const corrBar=document.getElementById('gonioCorrBar');
-  corrBar.style.width=corrPct+'%';
-  corrBar.style.background=corrPct>70?'var(--teal)':corrPct>40?'var(--yellow)':'var(--red)';
+  // Correlation
+  let corr = 0;
+  if (sumL2 > 0 && sumR2 > 0) corr = sumLR / Math.sqrt(sumL2 * sumR2);
+  gonioCorrVal = gonioCorrVal * 0.8 + corr * 0.2; // smooth
+  let dispCorr = gonioCorrVal;
+  if (Math.abs(dispCorr) < 0.01) dispCorr = 0;
+  document.getElementById('gonioCorr').textContent = (dispCorr > 0 ? '+' : '') + dispCorr.toFixed(2);
+  const corrPct = Math.max(0, Math.min(100, ((gonioCorrVal + 1) / 2) * 100));
+  const corrBar = document.getElementById('gonioCorrBar');
+  corrBar.style.width = corrPct + '%';
+  corrBar.style.background = corrPct > 70 ? 'var(--teal)' : corrPct > 40 ? 'var(--yellow)' : 'var(--red)';
 
-  const widthTarget=0.45+0.45*Math.abs(Math.sin(gonioPhase*0.13))+0.04*(Math.random()-.5);
-  gonioWidthVal=gonioWidthVal*0.93+widthTarget*0.07;
-  document.getElementById('gonioWidth').textContent=Math.round(gonioWidthVal*100)+'%';
-  document.getElementById('gonioWidthBar').style.width=(gonioWidthVal*100)+'%';
+  // Width
+  let width = 0;
+  if (sumM2 + sumS2 > 0) width = sumS2 / (sumM2 + sumS2);
+  gonioWidthVal = gonioWidthVal * 0.85 + width * 0.15;
+  document.getElementById('gonioWidth').textContent = Math.round(gonioWidthVal * 100) + '%';
+  document.getElementById('gonioWidthBar').style.width = (gonioWidthVal * 100) + '%';
 
-  // balance: slight drift around center
-  const bal=Math.sin(gonioPhase*0.07)*12;
-  const balAbs=Math.round(Math.abs(bal));
-  document.getElementById('gonioBalance').textContent=balAbs<2?'C':bal<0?'L'+balAbs:'R'+balAbs;
-  document.getElementById('gonioBalBar').style.width=(50+bal/2)+'%';
+  // Balance
+  let bal = 0;
+  if (sumL2 + sumR2 > 0) bal = (sumR2 - sumL2) / (sumL2 + sumR2);
+  let smoothBal = parseFloat(document.getElementById('gonioBalBar').dataset.val || '0');
+  smoothBal = smoothBal * 0.85 + bal * 0.15;
+  document.getElementById('gonioBalBar').dataset.val = smoothBal;
+  const balPct = smoothBal * 100;
+  const balAbs = Math.abs(Math.round(balPct));
+  document.getElementById('gonioBalance').textContent = balAbs < 2 ? 'C' : smoothBal < 0 ? 'L' + balAbs : 'R' + balAbs;
+  document.getElementById('gonioBalBar').style.width = (50 + smoothBal * 50) + '%';
 }
 
 // ===========================
@@ -1692,26 +1798,35 @@ drawWaveformSim();
 requestAnimationFrame(mainLoop);
 
 // --- TAURI INTEGRATION ---
-function playTestAudio() {
+async function openFilePicker() {
   if (window.__TAURI__) {
-    const path = "C:/Users/alama/Favorites/Projek kecil/FL studio EQ/Ado - Sakura Biyori and Time Machine with Hatsune Miku.flac";
-    window.__TAURI__.core.invoke('play_audio', { path: path })
-      .then(() => showToast('Playing FLAC...'))
-      .catch(e => showToast('Error: ' + e));
+    try {
+      const selected = await window.__TAURI__.core.invoke('plugin:dialog|open', {
+        options: {
+          multiple: false,
+          filters: [{ name: 'Audio', extensions: ['flac', 'wav', 'mp3', 'ogg', 'aac', 'm4a'] }]
+        }
+      });
+      if (selected) {
+        window.__TAURI__.core.invoke('play_audio', { path: selected })
+          .then(() => showToast('Playing: ' + selected.split(/[/\\]/).pop()))
+          .catch(e => showToast('Error: ' + e));
+      }
+    } catch (e) {
+      showToast('Error: ' + e);
+    }
   } else {
     showToast('Tauri tidak terdeteksi');
   }
 }
 
-let lastGains = [0,0,0,0,0,0,0];
+let lastBands = "";
 setInterval(() => {
   if (!window.__TAURI__) return;
-  for(let i=0; i<7 && i<bands.length; i++) {
-    let current = bands[i].gain;
-    if(current !== lastGains[i]) {
-      lastGains[i] = current;
-      window.__TAURI__.core.invoke('set_eq_gain', { band: i, gain: current }).catch(console.error);
-    }
+  const current = JSON.stringify(bands);
+  if(current !== lastBands) {
+    lastBands = current;
+    window.__TAURI__.core.invoke('update_eq_bands', { bands: bands }).catch(console.error);
   }
 }, 50);
 
