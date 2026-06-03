@@ -1103,9 +1103,32 @@ function drawOsc(){
 const equoCv=document.getElementById('equoc');
 let equoPts=[];
 function initEquo(){
-  const W=equoCv.width,H=equoCv.height,N=80;equoPts=[];
-  for(let i=0;i<N;i++){const t=i/N*Math.PI*2;equoPts.push(H/2+Math.sin(t*2)*12+Math.sin(t*3.5)*6+Math.sin(t*0.7)*7);}
-  drawEquo();
+  updateCanvasFromFaders();
+}
+function updateFadersFromCanvas() {
+    const H = equoCv.height;
+    for (let i = 0; i < 7; i++) {
+        const ptsIdx = Math.round((i / 6) * (equoPts.length - 1));
+        const y = equoPts[ptsIdx];
+        const db = ((H / 2 - y) / (H / 2)) * 15;
+        faderData[i].db = Math.max(-15, Math.min(15, Math.round(db * 10) / 10));
+    }
+    buildFaders();
+}
+function updateCanvasFromFaders() {
+    const H = equoCv.height;
+    const N = 80;
+    const faderPts = faderData.map(f => Math.max(2, Math.min(H - 2, H / 2 - (f.db / 15) * (H / 2))));
+    let newPts = [];
+    for(let i=0; i<N; i++){
+        const faderPos = (i / (N - 1)) * 6;
+        const idx1 = Math.floor(faderPos);
+        const idx2 = Math.min(6, Math.ceil(faderPos));
+        const frac = faderPos - idx1;
+        newPts.push(faderPts[idx1] * (1 - frac) + faderPts[idx2] * frac);
+    }
+    equoPts = smoothPts(smoothPts(newPts));
+    drawEquo();
 }
 function toggleGEQSmooth(){geqSmooth=!geqSmooth;document.getElementById('geqSmooth').className='pill '+(geqSmooth?'pill-on':'pill-off');showToast(geqSmooth?'Smooth ON':'Smooth OFF');}
 function drawEquo(){
@@ -1128,7 +1151,22 @@ function drawEquo(){
 function smoothPts(arr){return arr.map((v,i)=>{const s=arr.slice(Math.max(0,i-2),i+3);return s.reduce((a,b)=>a+b,0)/s.length;});}
 let equoDraw=false;
 equoCv.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} equoDraw=true;equoCv.setPointerCapture(e.pointerId);});
-equoCv.addEventListener('pointermove',e=>{if(!equoDraw)return;const r=equoCv.getBoundingClientRect();const x=(e.clientX-r.left)*(equoCv.width/r.width);const y=(e.clientY-r.top)*(equoCv.height/r.height);const idx=Math.round((x/equoCv.width)*(equoPts.length-1));if(idx>=0&&idx<equoPts.length)equoPts[idx]=Math.max(2,Math.min(equoCv.height-2,y));drawEquo();});
+equoCv.addEventListener('pointermove',e=>{
+  if(!equoDraw)return;
+  const r=equoCv.getBoundingClientRect();
+  const x=(e.clientX-r.left)*(equoCv.width/r.width);
+  const y=(e.clientY-r.top)*(equoCv.height/r.height);
+  const idx=Math.round((x/equoCv.width)*(equoPts.length-1));
+  if(idx>=0&&idx<equoPts.length){
+    equoPts[idx]=Math.max(2,Math.min(equoCv.height-2,y));
+    // Fill nearby points slightly for a thicker brush feel
+    for(let i=-2; i<=2; i++) {
+        if(idx+i>=0 && idx+i<equoPts.length) equoPts[idx+i] = equoPts[idx];
+    }
+  }
+  drawEquo();
+  updateFadersFromCanvas();
+});
 equoCv.addEventListener('pointerup',()=>equoDraw=false);
 
 // ===========================
@@ -1145,7 +1183,14 @@ function buildFaders(){
 <div class="ffreq" style="font-size:7px">${['100','250','500','1k','2k','5k','10k'][fi]}</div>`;
     const track=col.querySelector('.ftrack');let fdrag=false,startY=0,startDb=f.db;
     track.addEventListener('pointerdown',e=>{if(eqLocked){showToast('EQ terkunci!');return;} fdrag=true;startY=e.clientY;startDb=f.db;track.setPointerCapture(e.pointerId);e.stopPropagation();});
-    track.addEventListener('pointermove',e=>{if(!fdrag)return;const dy=startY-e.clientY;f.db=Math.max(-15,Math.min(15,Math.round((startDb+dy/2.5)*10)/10));buildFaders();showToast(faderData[fi].db>0?'+'+faderData[fi].db+'dB':faderData[fi].db+'dB');});
+    track.addEventListener('pointermove',e=>{
+      if(!fdrag)return;
+      const dy=startY-e.clientY;
+      f.db=Math.max(-15,Math.min(15,Math.round((startDb+dy/2.5)*10)/10));
+      buildFaders();
+      updateCanvasFromFaders();
+      showToast(faderData[fi].db>0?'+'+faderData[fi].db+'dB':faderData[fi].db+'dB');
+    });
     track.addEventListener('pointerup',()=>fdrag=false);
     row.appendChild(col);
   });
@@ -1823,10 +1868,33 @@ async function openFilePicker() {
 let lastBands = "";
 setInterval(() => {
   if (!window.__TAURI__) return;
-  const current = JSON.stringify(bands);
+  
+  // Combine Parametric EQ and Graphic EQ (EQUO)
+  let allBands = [];
+  
+  // 1. Parametric EQ (if not bypassed... though bypassed is not implemented globally here, let's just send bands)
+  // if (!bypassed) { // bypassed is the UI variable for Parametric EQ
+  allBands = [...bands];
+  // }
+
+  // 2. Graphic EQ (from faderData)
+  const geqFreqs = [100, 250, 500, 1000, 2000, 5000, 10000];
+  faderData.forEach((f, i) => {
+      if (f.db !== 0) {
+          allBands.push({
+              freq: geqFreqs[i],
+              gain: f.db,
+              q: 1.4,
+              shape: 'Peaking',
+              muted: false
+          });
+      }
+  });
+
+  const current = JSON.stringify(allBands);
   if(current !== lastBands) {
     lastBands = current;
-    window.__TAURI__.core.invoke('update_eq_bands', { bands: bands }).catch(console.error);
+    window.__TAURI__.core.invoke('update_eq_bands', { bands: allBands }).catch(console.error);
   }
 }, 50);
 

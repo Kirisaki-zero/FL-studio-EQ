@@ -3,17 +3,23 @@
 use claxon::FlacReader;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use biquad::*;
-use tauri::Manager;
+use crossbeam_channel::{unbounded, Sender, Receiver};
 
-// 7-Band EQ Frequencies
-const EQ_FREQS: [f32; 7] = [60.0, 230.0, 600.0, 1500.0, 3000.0, 8000.0, 14000.0];
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
-struct AppState {
-    audio_state: Arc<Mutex<AudioState>>,
-}
+/// Oscilloscope ring buffer capacity (samples). ~93ms @ 44100 Hz.
+const OSC_SIZE: usize = 4096;
+
+/// Sentinel value meaning "no seek is pending".
+const NO_SEEK: u64 = u64::MAX;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, serde::Deserialize, PartialEq)]
 pub struct BandConfig {
@@ -24,295 +30,534 @@ pub struct BandConfig {
     pub muted: bool,
 }
 
-struct AudioState {
-    is_playing: bool,
-    samples: Vec<f32>,
-    position: f64, // float position for sub-sample interpolation
+/// Decoded PCM audio data — mapped to a temporary file via mmap.
+/// Wrapped in Arc so the audio thread can read it without a lock after swap.
+struct AudioData {
+    mmap: Option<memmap2::Mmap>,
+    samples_len: usize,
     sample_rate: u32,
     channels: u16,
-    bands: Vec<BandConfig>, // 7 bands
-    meter_peaks: [f32; 4], // L, R, M, S maximum amplitude
-    osc_buffer: Vec<(f32, f32)>, // Circular buffer for Oscilloscope (L, R)
-    osc_index: usize,
 }
 
-// Biquad filter chain for one channel
-struct EqChannel {
-    filters: Vec<DirectForm2Transposed<f32>>,
-    sample_rate: f32,
+impl Default for AudioData {
+    fn default() -> Self {
+        Self { mmap: None, samples_len: 0, sample_rate: 44100, channels: 2 }
+    }
 }
 
-impl EqChannel {
-    fn new(sample_rate: f32) -> Self {
+// ─────────────────────────────────────────────────────────────────────────────
+// Lock-Free Peak Meters (AtomicU32 storing f32 bits)
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct Peaks {
+    vals: [AtomicU32; 4],
+}
+
+impl Peaks {
+    fn new() -> Self {
         Self {
-            filters: vec![],
-            sample_rate,
+            vals: [
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+            ],
         }
     }
 
-    fn update_filters(&mut self, bands: &[BandConfig]) {
-        self.filters.clear();
+    /// Update peak if the new value is larger. Called only from audio thread.
+    fn update(&self, i: usize, v: f32) {
+        let old = f32::from_bits(self.vals[i].load(Ordering::Relaxed));
+        if v > old {
+            self.vals[i].store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
 
-        for band in bands.iter() {
-            if band.muted { continue; } // Skip muted bands
-            
-            let f = band.freq.hz();
-            let fs = self.sample_rate.hz();
-            
-            // Freq should be < Nyquist
-            if band.freq >= self.sample_rate / 2.0 { continue; }
+    /// Read and atomically reset the peak. Called from UI thread.
+    fn take(&self, i: usize) -> f32 {
+        f32::from_bits(self.vals[i].swap(0, Ordering::Relaxed))
+    }
+}
 
-            let filter_type = match band.shape.as_str() {
-                "Low Shelf" => biquad::Type::LowShelf(band.gain),
-                "High Shelf" => biquad::Type::HighShelf(band.gain),
-                "Peaking" => biquad::Type::PeakingEQ(band.gain),
-                "LP" | "Low Pass" => biquad::Type::LowPass,
+// ─────────────────────────────────────────────────────────────────────────────
+// EQ Filter Channel
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct EqCh {
+    filters: Vec<DirectForm2Transposed<f32>>,
+    sr: f32,
+}
+
+impl EqCh {
+    fn new(sr: f32) -> Self {
+        Self { filters: vec![], sr }
+    }
+
+    fn update(&mut self, bands: &[BandConfig]) {
+        let mut active_idx = 0;
+        for b in bands {
+            if b.muted || b.freq >= self.sr / 2.0 { continue; }
+            let ft = match b.shape.as_str() {
+                "Low Shelf"        => biquad::Type::LowShelf(b.gain),
+                "High Shelf"       => biquad::Type::HighShelf(b.gain),
+                "LP" | "Low Pass"  => biquad::Type::LowPass,
                 "HP" | "High Pass" => biquad::Type::HighPass,
-                "Notch" => biquad::Type::Notch,
-                "Band Pass" => biquad::Type::BandPass,
-                _ => biquad::Type::PeakingEQ(band.gain), // Fallback
+                "Notch"            => biquad::Type::Notch,
+                "Band Pass"        => biquad::Type::BandPass,
+                _                  => biquad::Type::PeakingEQ(b.gain),
             };
-
-            if let Ok(coeffs) = biquad::Coefficients::<f32>::from_params(filter_type, fs, f, band.q) {
-                self.filters.push(DirectForm2Transposed::<f32>::new(coeffs));
+            
+            // PERBAIKAN FATAL: Urutan yang benar adalah (Type, SampleRate, Frequency, Q)
+            if let Ok(c) = biquad::Coefficients::<f32>::from_params(
+                ft, self.sr.hz(), b.freq.hz(), b.q,
+            ) {
+                if active_idx < self.filters.len() {
+                    // Update memori filter lama (Anti-Clicking / Zipper Noise)
+                    self.filters[active_idx].update_coefficients(c);
+                } else {
+                    // Buat filter baru jika kurang
+                    self.filters.push(DirectForm2Transposed::<f32>::new(c));
+                }
+                active_idx += 1;
             }
         }
+        // Hapus sisa filter yang tidak terpakai
+        self.filters.truncate(active_idx);
     }
 
-    fn process(&mut self, sample: f32) -> f32 {
-        let mut s = sample;
-        for filter in &mut self.filters {
-            s = filter.run(s);
-        }
-        s
+    fn run(&mut self, s: f32) -> f32 {
+        self.filters.iter_mut().fold(s, |acc, f| f.run(acc))
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Application State
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AppState {
+    /// Shared audio data. Loader thread writes; audio thread reads briefly.
+    audio_data: Arc<Mutex<Arc<AudioData>>>,
+
+    /// Current playback position in source *frames* (written by audio thread,
+    /// read by UI for display).
+    play_pos: Arc<AtomicU64>,
+
+    /// Seek target set by UI. Audio thread acknowledges by resetting to NO_SEEK.
+    /// This gives < 5 ms seek latency (one audio callback period).
+    seek_pos: Arc<AtomicU64>,
+
+    /// Playback running state — toggled by UI, respected by audio thread.
+    is_playing: Arc<AtomicBool>,
+
+    /// Channel for sending updated EQ bands to the audio thread (lock-free).
+    eq_tx: Sender<Vec<BandConfig>>,
+
+    /// Lock-free peak meters (L, R, Mid, Side).
+    peaks: Arc<Peaks>,
+
+    /// Consumer side of the oscilloscope ring buffer. Only accessed by Tauri
+    /// commands (not the audio callback).
+    osc_consumer: Arc<Mutex<ringbuf::HeapConsumer<(f32, f32)>>>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tauri Commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Load and play a FLAC file. Decoding happens in a background thread so the
+/// UI never blocks. Silence is played during the decode phase.
 #[tauri::command]
 fn play_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut reader = FlacReader::open(&path).map_err(|e| e.to_string())?;
-    let info = reader.streaminfo();
-    
-    let mut samples = Vec::new();
-    let max_val = (1u64 << (info.bits_per_sample - 1)) as f32;
-    
-    // Decode FLAC to f32 PCM
-    for sample in reader.samples() {
-        let s = sample.unwrap_or(0);
-        samples.push(s as f32 / max_val);
-    }
-    
-    let mut st = state.audio_state.lock().unwrap();
-    st.samples = samples;
-    st.sample_rate = info.sample_rate;
-    st.channels = info.channels as u16;
-    st.position = 0.0;
-    st.is_playing = true;
-    
-    println!("Loaded audio: {} ({} Hz, {} ch)", path, info.sample_rate, info.channels);
+    let audio_data = Arc::clone(&state.audio_data);
+    let play_pos   = Arc::clone(&state.play_pos);
+    let is_playing = Arc::clone(&state.is_playing);
+
+    // Mute audio while loading to avoid stale samples
+    is_playing.store(false, Ordering::Relaxed);
+
+    std::thread::spawn(move || {
+        let result = (|| -> Result<Arc<AudioData>, String> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+            
+            // Cek apakah ada header ID3 (sering ditambahkan secara paksa oleh beberapa tagger)
+            let mut magic = [0u8; 4];
+            if file.read_exact(&mut magic).is_ok() && &magic[0..3] == b"ID3" {
+                // Lewati header ID3
+                let mut header = [0u8; 6];
+                if file.read_exact(&mut header).is_ok() {
+                    let mut size = ((header[2] as u64) << 21)
+                        | ((header[3] as u64) << 14)
+                        | ((header[4] as u64) << 7)
+                        | (header[5] as u64);
+                    // Jika ada ID3 footer
+                    if (header[1] & 0x10) != 0 { size += 10; }
+                    // Seek melewati metadata ID3
+                    file.seek(SeekFrom::Current(size as i64)).map_err(|e| e.to_string())?;
+                }
+            } else {
+                // Kembalikan kursor ke awal jika bukan ID3
+                file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            }
+
+            // Pencarian tangguh (Robust Sync): Cari marker "fLaC" 
+            // untuk melewati padding kosong setelah ID3
+            let mut sync_buf = [0u8; 4];
+            let mut found = false;
+            if file.read_exact(&mut sync_buf).is_ok() {
+                if &sync_buf == b"fLaC" {
+                    found = true;
+                    file.seek(SeekFrom::Current(-4)).unwrap();
+                } else {
+                    let mut search_limit = 1024 * 1024; // maksimal cari 1MB ke depan
+                    let mut ring = sync_buf;
+                    let mut byte = [0u8; 1];
+                    while search_limit > 0 && file.read_exact(&mut byte).is_ok() {
+                        ring[0] = ring[1];
+                        ring[1] = ring[2];
+                        ring[2] = ring[3];
+                        ring[3] = byte[0];
+                        if &ring == b"fLaC" {
+                            found = true;
+                            file.seek(SeekFrom::Current(-4)).unwrap();
+                            break;
+                        }
+                        search_limit -= 1;
+                    }
+                }
+            }
+
+            if !found {
+                return Err("Bukan file FLAC yang valid (tanda 'fLaC' tidak ditemukan)".into());
+            }
+
+            let mut reader = FlacReader::new(file).map_err(|e| format!("FLAC parse error: {}", e))?;
+            let info    = reader.streaminfo();
+            let max_val = (1u64 << (info.bits_per_sample - 1)) as f32;
+
+            // Buat tempfile untuk menampung data PCM mentah f32 (menghindari OOM)
+            use std::io::{Write, BufWriter};
+            let temp_file = tempfile::tempfile().map_err(|e| e.to_string())?;
+            let mut writer = BufWriter::with_capacity(1024 * 1024, temp_file);
+            let mut samples_len = 0;
+
+            // Stream dan tulis sampel langsung ke disk virtual (menggunakan chunking & bufwriter)
+            let mut chunk = Vec::with_capacity(8192);
+            for sample in reader.samples().filter_map(|s| s.ok()) {
+                chunk.push(sample as f32 / max_val);
+                if chunk.len() >= 8192 {
+                    writer.write_all(bytemuck::cast_slice(&chunk)).map_err(|e| e.to_string())?;
+                    samples_len += chunk.len();
+                    chunk.clear();
+                }
+            }
+            if !chunk.is_empty() {
+                writer.write_all(bytemuck::cast_slice(&chunk)).map_err(|e| e.to_string())?;
+                samples_len += chunk.len();
+            }
+
+            // Flush dan kembalikan ke file asli
+            writer.flush().map_err(|e| e.to_string())?;
+            let temp_file = writer.into_inner().map_err(|e| e.to_string())?;
+
+            // Mmap file temp ke memori (OS akan mengurus paging jika RAM penuh)
+            let mmap = unsafe { memmap2::MmapOptions::new().map(&temp_file) }.map_err(|e| e.to_string())?;
+
+            Ok(Arc::new(AudioData {
+                mmap: Some(mmap),
+                samples_len,
+                sample_rate: info.sample_rate,
+                channels:    info.channels as u16,
+            }))
+        })();
+
+        match result {
+            Ok(data) => {
+                *audio_data.lock().unwrap() = data;
+                play_pos.store(0, Ordering::Relaxed);
+                is_playing.store(true, Ordering::Relaxed);
+                println!("Loaded: {}", path);
+            }
+            Err(e) => eprintln!("Load error: {e}"),
+        }
+    });
+
     Ok(())
 }
 
+/// Toggle play/pause.
+#[tauri::command]
+fn pause_audio(state: tauri::State<'_, AppState>) {
+    let prev = state.is_playing.load(Ordering::Relaxed);
+    state.is_playing.store(!prev, Ordering::Relaxed);
+}
+
+/// Seek to a position (in source frames). Takes effect within one audio
+/// callback period (typically < 5 ms) — ultra-low latency scrubbing.
+#[tauri::command]
+fn seek_audio(frame: u64, state: tauri::State<'_, AppState>) {
+    state.seek_pos.store(frame, Ordering::Relaxed);
+}
+
+/// Push new EQ band configuration to the audio thread (lock-free via channel).
 #[tauri::command]
 fn update_eq_bands(bands: Vec<BandConfig>, state: tauri::State<'_, AppState>) {
-    let mut st = state.audio_state.lock().unwrap();
-    st.bands = bands;
+    let _ = state.eq_tx.send(bands);
 }
 
+/// Read and reset peak meters (L, R, Mid, Side) in dBFS.
 #[tauri::command]
 fn get_meter_levels(state: tauri::State<'_, AppState>) -> [f32; 4] {
-    let mut st = state.audio_state.lock().unwrap();
-    let peaks = st.meter_peaks;
-    // Reset peaks for next poll window
-    st.meter_peaks = [0.0; 4];
-    
-    let to_db = |val: f32| if val > 1e-5 { 20.0 * val.log10() } else { -100.0 };
-    [to_db(peaks[0]), to_db(peaks[1]), to_db(peaks[2]), to_db(peaks[3])]
+    [0, 1, 2, 3].map(|i| {
+        let v = state.peaks.take(i);
+        if v > 1e-5 { 20.0 * v.log10() } else { -100.0 }
+    })
 }
 
+/// Return (is_playing, current_frame, total_frames).
+#[tauri::command]
+fn get_playback_info(state: tauri::State<'_, AppState>) -> (bool, u64, u64) {
+    let playing = state.is_playing.load(Ordering::Relaxed);
+    let pos     = state.play_pos.load(Ordering::Relaxed);
+    let total   = {
+        let d  = state.audio_data.lock().unwrap();
+        let ch = d.channels.max(1) as u64;
+        d.samples_len as u64 / ch
+    };
+    (playing, pos, total)
+}
+
+/// Drain the oscilloscope ring buffer and return (left_channel, right_channel).
 #[tauri::command]
 fn get_oscilloscope_data(state: tauri::State<'_, AppState>) -> (Vec<f32>, Vec<f32>) {
-    let st = state.audio_state.lock().unwrap();
-    let capacity = st.osc_buffer.len();
-    if capacity == 0 {
+    let Ok(mut cons) = state.osc_consumer.try_lock() else {
         return (vec![], vec![]);
-    }
-    
-    let mut left = Vec::with_capacity(capacity);
-    let mut right = Vec::with_capacity(capacity);
-    
-    // Read from oldest to newest
-    for i in 0..capacity {
-        let idx = (st.osc_index + i) % capacity;
-        let (l, r) = st.osc_buffer[idx];
+    };
+    let n = cons.len();
+    let (mut left, mut right) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    while let Some((l, r)) = cons.pop() {
         left.push(l);
         right.push(r);
     }
-    
     (left, right)
 }
 
-fn audio_thread(audio_state: Arc<Mutex<AudioState>>) {
-    let host = cpal::default_host();
-    let device = host.default_output_device().expect("no output device available");
-    let mut config = device.default_output_config().unwrap().config();
-    
-    // Wait until audio is loaded to match sample rate if possible, 
-    // but for simplicity we will just use the device default and resample later if needed.
-    // For now, let's assume device default is fine.
-    
-    let mut eq_left = EqChannel::new(config.sample_rate.0 as f32);
-    let mut eq_right = EqChannel::new(config.sample_rate.0 as f32);
-    let mut current_bands: Vec<BandConfig> = vec![];
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio Thread (Lock-Free Render Callback)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn audio_thread(
+    audio_data:   Arc<Mutex<Arc<AudioData>>>,
+    play_pos:     Arc<AtomicU64>,
+    seek_pos:     Arc<AtomicU64>,
+    is_playing:   Arc<AtomicBool>,
+    eq_rx:        Receiver<Vec<BandConfig>>,
+    peaks:        Arc<Peaks>,
+    mut osc_prod: ringbuf::HeapProducer<(f32, f32)>,
+) {
+    let host     = cpal::default_host();
+    let device   = host.default_output_device().expect("no output device");
+    let sc       = device.default_output_config().unwrap();
+    let out_sr   = sc.sample_rate().0 as f32;
+    let out_ch   = sc.channels() as usize;
+    let config: cpal::StreamConfig = sc.into();
+
+    let mut eq_l       = EqCh::new(out_sr);
+    let mut eq_r       = EqCh::new(out_sr);
+    let mut cur_bands  = Vec::<BandConfig>::new();
+
+    // Local snapshot of AudioData Arc — refreshed cheaply without blocking.
+    let mut local_data: Arc<AudioData> = Arc::new(AudioData::default());
+
+    // Local high-precision playback position (f64) owned by audio thread.
+    // This avoids atomic float arithmetic per sample.
+    let mut local_pos: f64 = 0.0;
 
     let stream = device.build_output_stream(
         &config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut st = audio_state.lock().unwrap();
-            
-            // Update EQ if bands changed
-            if st.bands != current_bands {
-                current_bands = st.bands.clone();
-                eq_left.update_filters(&current_bands);
-                eq_right.update_filters(&current_bands);
+        move |data: &mut [f32], _| {
+            // ── Step 1: Receive EQ updates (non-blocking) ─────────────────
+            while let Ok(bands) = eq_rx.try_recv() {
+                if bands != cur_bands {
+                    cur_bands = bands;
+                    eq_l.update(&cur_bands);
+                    eq_r.update(&cur_bands);
+                }
             }
 
-            if !st.is_playing || st.samples.is_empty() {
-                for sample in data.iter_mut() {
-                    *sample = 0.0;
+            // ── Step 2: Snapshot audio data Arc (brief lock, just ptr swap) ─
+            if let Ok(guard) = audio_data.try_lock() {
+                if !Arc::ptr_eq(&*guard, &local_data) {
+                    local_data = Arc::clone(&*guard);
+                    local_pos  = 0.0;
                 }
+            }
+
+            // ── Step 3: Handle seek (ultra-low latency) ───────────────────
+            // The seek_pos atomic is written by the UI thread and read here.
+            // Taking effect within one callback period ≈ 2–5 ms.
+            let seek = seek_pos.load(Ordering::Relaxed);
+            if seek != NO_SEEK {
+                local_pos = seek as f64;
+                seek_pos.store(NO_SEEK, Ordering::Relaxed); // acknowledge
+            }
+
+            // ── Step 4: Output silence if not playing ─────────────────────
+            if !is_playing.load(Ordering::Relaxed) || local_data.samples_len == 0 {
+                for s in data.iter_mut() { *s = 0.0; }
                 return;
             }
 
-            let channels = config.channels as usize;
-            let src_channels = st.channels as usize;
-            let output_sr = config.sample_rate.0 as f64;
-            let input_sr = st.sample_rate as f64;
-            let speed_ratio = input_sr / output_sr;
+            let src_ch    = local_data.channels.max(1) as usize;
+            let src_sr    = local_data.sample_rate as f64;
+            let ratio     = src_sr / out_sr as f64;
+            let src_total = local_data.samples_len;
             
-            let mut local_peaks = [0.0f32; 4];
+            // Cast MMAP bytes ke slice f32 secara aman
+            let mmap_ref = local_data.mmap.as_ref();
+            let samples: &[f32] = match mmap_ref {
+                Some(m) => bytemuck::cast_slice(m),
+                None => &[],
+            };
 
-            for frame in data.chunks_mut(channels) {
-                let pos_int = st.position.floor() as usize;
-                let pos_frac = (st.position - pos_int as f64) as f32;
+            let get_s = |fi: usize, ch: usize| -> f32 {
+                samples.get(fi * src_ch + ch).copied().unwrap_or(0.0)
+            };
 
-                // Check if we've reached the end
-                if pos_int * src_channels >= st.samples.len() {
-                    st.is_playing = false;
-                    for sample in frame.iter_mut() {
-                        *sample = 0.0;
-                    }
+            // ── Step 5: Render audio frames ───────────────────────────────
+            for frame in data.chunks_mut(out_ch) {
+                let pi   = local_pos as usize;
+                let frac = (local_pos - pi as f64) as f32;
+
+                // End of audio
+                if pi * src_ch >= src_total {
+                    is_playing.store(false, Ordering::Relaxed);
+                    for s in frame.iter_mut() { *s = 0.0; }
                     continue;
                 }
 
-                // Helper to safely get a sample
-                let get_sample = |frame_idx: usize, ch: usize| -> f32 {
-                    let idx = frame_idx * src_channels + ch;
-                    if idx < st.samples.len() {
-                        st.samples[idx]
-                    } else {
-                        0.0
-                    }
+                // Linear interpolation (L channel)
+                let lin = {
+                    let s0 = get_s(pi, 0);
+                    let s1 = get_s(pi + 1, 0);
+                    s0 + (s1 - s0) * frac
                 };
 
-                // Linear interpolation for Left channel
-                let left_0 = get_sample(pos_int, 0);
-                let left_1 = get_sample(pos_int + 1, 0);
-                let left_in = left_0 + (left_1 - left_0) * pos_frac;
-
-                // Linear interpolation for Right channel (or duplicate Left if mono)
-                let right_in = if src_channels > 1 {
-                    let right_0 = get_sample(pos_int, 1);
-                    let right_1 = get_sample(pos_int + 1, 1);
-                    right_0 + (right_1 - right_0) * pos_frac
+                // Linear interpolation (R channel, or duplicate L if mono)
+                let rin = if src_ch > 1 {
+                    let s0 = get_s(pi, 1);
+                    let s1 = get_s(pi + 1, 1);
+                    s0 + (s1 - s0) * frac
                 } else {
-                    left_in
+                    lin
                 };
 
-                let left_out = eq_left.process(left_in);
-                let right_out = eq_right.process(right_in);
-                
-                // Calculate Mid and Side
-                let mid_out = (left_out + right_out) * 0.70710678;
-                let side_out = (left_out - right_out) * 0.70710678;
+                // Apply EQ
+                let lout = eq_l.run(lin);
+                let rout = eq_r.run(rin);
+                let mid  = (lout + rout) * 0.70710678;
+                let side = (lout - rout) * 0.70710678;
 
-                // Update local peaks
-                local_peaks[0] = local_peaks[0].max(left_out.abs());
-                local_peaks[1] = local_peaks[1].max(right_out.abs());
-                local_peaks[2] = local_peaks[2].max(mid_out.abs());
-                local_peaks[3] = local_peaks[3].max(side_out.abs());
+                // Update meters
+                peaks.update(0, lout.abs());
+                peaks.update(1, rout.abs());
+                peaks.update(2, mid.abs());
+                peaks.update(3, side.abs());
 
-                if channels >= 1 {
-                    frame[0] = left_out;
-                }
-                if channels >= 2 {
-                    frame[1] = right_out;
-                }
+                // Write to output
+                if out_ch >= 1 { frame[0] = lout; }
+                if out_ch >= 2 { frame[1] = rout; }
 
-                // Push to oscilloscope buffer
-                let osc_cap = st.osc_buffer.len();
-                if osc_cap > 0 {
-                    let osc_idx = st.osc_index;
-                    st.osc_buffer[osc_idx] = (left_out, right_out);
-                    st.osc_index = (osc_idx + 1) % osc_cap;
-                }
+                // Push to oscilloscope ring buffer (lock-free SPSC)
+                osc_prod.push((lout, rout)).ok();
 
-                st.position += speed_ratio;
+                // Advance position
+                local_pos += ratio;
             }
-            
-            // Accumulate peaks in state
-            for i in 0..4 {
-                st.meter_peaks[i] = st.meter_peaks[i].max(local_peaks[i]);
-            }
+
+            // Publish position for UI display (once per callback, not per sample)
+            play_pos.store(local_pos as u64, Ordering::Relaxed);
         },
-        |err| eprintln!("Audio error: {}", err),
-        None
-    ).unwrap();
+        |err| eprintln!("Audio stream error: {err}"),
+        None,
+    ).expect("Failed to build audio stream");
 
-    stream.play().unwrap();
+    stream.play().expect("Failed to start audio stream");
 
-    // keep thread alive
+    // Keep thread alive
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry Point
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn main() {
     let initial_bands = vec![
-        BandConfig { freq: 20.0, gain: 0.0, q: 0.7, shape: "HP".into(), muted: false },
-        BandConfig { freq: 80.0, gain: -3.0, q: 1.2, shape: "Low Shelf".into(), muted: false },
-        BandConfig { freq: 250.0, gain: 2.0, q: 1.8, shape: "Peaking".into(), muted: false },
-        BandConfig { freq: 1000.0, gain: 3.0, q: 1.4, shape: "Peaking".into(), muted: false },
-        BandConfig { freq: 4000.0, gain: -2.0, q: 2.0, shape: "Peaking".into(), muted: false },
-        BandConfig { freq: 10000.0, gain: 4.0, q: 1.6, shape: "High Shelf".into(), muted: false },
-        BandConfig { freq: 20000.0, gain: 0.0, q: 0.7, shape: "LP".into(), muted: false },
+        BandConfig { freq: 20.0,    gain: 0.0,  q: 0.7, shape: "HP".into(),         muted: false },
+        BandConfig { freq: 80.0,    gain: -3.0, q: 1.2, shape: "Low Shelf".into(),  muted: false },
+        BandConfig { freq: 250.0,   gain: 2.0,  q: 1.8, shape: "Peaking".into(),    muted: false },
+        BandConfig { freq: 1000.0,  gain: 3.0,  q: 1.4, shape: "Peaking".into(),    muted: false },
+        BandConfig { freq: 4000.0,  gain: -2.0, q: 2.0, shape: "Peaking".into(),    muted: false },
+        BandConfig { freq: 10000.0, gain: 4.0,  q: 1.6, shape: "High Shelf".into(), muted: false },
+        BandConfig { freq: 20000.0, gain: 0.0,  q: 0.7, shape: "LP".into(),         muted: false },
     ];
 
+    // Lock-free communication channels
+    let (eq_tx, eq_rx) = unbounded::<Vec<BandConfig>>();
+
+    // Oscilloscope SPSC ring buffer
+    let rb             = ringbuf::HeapRb::<(f32, f32)>::new(OSC_SIZE);
+    let (osc_prod, osc_cons) = rb.split();
+
+    // Shared atomic state
+    let peaks      = Arc::new(Peaks::new());
+    let audio_data = Arc::new(Mutex::new(Arc::new(AudioData::default())));
+    let play_pos   = Arc::new(AtomicU64::new(0));
+    let seek_pos   = Arc::new(AtomicU64::new(NO_SEEK));
+    let is_playing = Arc::new(AtomicBool::new(false));
+
     let state = AppState {
-        audio_state: Arc::new(Mutex::new(AudioState {
-            is_playing: false,
-            samples: vec![],
-            position: 0.0,
-            sample_rate: 44100,
-            channels: 2,
-            bands: initial_bands,
-            meter_peaks: [0.0; 4],
-            osc_buffer: vec![(0.0, 0.0); 4096],
-            osc_index: 0,
-        })),
+        audio_data:   Arc::clone(&audio_data),
+        play_pos:     Arc::clone(&play_pos),
+        seek_pos:     Arc::clone(&seek_pos),
+        is_playing:   Arc::clone(&is_playing),
+        eq_tx:        eq_tx.clone(),
+        peaks:        Arc::clone(&peaks),
+        osc_consumer: Arc::new(Mutex::new(osc_cons)),
     };
 
-    // Note: If you have UI related stuff inside `main`, keep it below
-    // Start Audio thread
-    let audio_state_clone = Arc::clone(&state.audio_state);
+    // Send initial EQ configuration to audio thread
+    let _ = eq_tx.send(initial_bands);
+
+    // Spawn lock-free audio thread
     std::thread::spawn(move || {
-        audio_thread(audio_state_clone);
+        audio_thread(
+            audio_data,
+            play_pos,
+            seek_pos,
+            is_playing,
+            eq_rx,
+            peaks,
+            osc_prod,
+        );
     });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![play_audio, update_eq_bands, get_meter_levels, get_oscilloscope_data])
+        .invoke_handler(tauri::generate_handler![
+            play_audio,
+            pause_audio,
+            seek_audio,
+            update_eq_bands,
+            get_meter_levels,
+            get_playback_info,
+            get_oscilloscope_data,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

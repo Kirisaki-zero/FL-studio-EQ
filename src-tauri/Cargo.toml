@@ -5,14 +5,17 @@ edition     = "2021"
 description = "High-resolution audio signal analyzer with FFT and THD calculation"
 
 [dependencies]
-claxon   = "0.4"
-rustfft  = "6"
-cpal     = "0.15"
-num-complex = "0.4"
-biquad   = "0.4.2"
-tauri    = { version = "2.0.0", features = [] }
+claxon              = "0.4"
+cpal                = "0.15"
+biquad              = "0.4.2"
+ringbuf             = "0.3"
+crossbeam-channel   = "0.5"
+memmap2             = "0.9"
+tempfile            = "3.10"
+bytemuck            = "1.16"
+tauri               = { version = "2.0.0", features = [] }
 tauri-plugin-dialog = "2"
-serde = { version = "1.0.228", features = ["derive"] }
+serde               = { version = "1.0.228", features = ["derive"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
