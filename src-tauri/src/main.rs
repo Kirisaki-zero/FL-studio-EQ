@@ -24,6 +24,11 @@ fn main() {
     // Lock-free communication channels
     let (eq_tx, eq_rx) = unbounded::<Vec<BandConfig>>();
     let (comp_tx, comp_rx) = unbounded::<CompressorConfig>();
+    let (reverb_tx, reverb_rx) = unbounded::<ReverbConfig>();
+    let (delay_tx, delay_rx) = unbounded::<DelayConfig>();
+    let (chorus_tx, chorus_rx) = unbounded::<ChorusConfig>();
+    let (flanger_tx, flanger_rx) = unbounded::<FlangerConfig>();
+    let (distort_tx, distort_rx) = unbounded::<DistortConfig>();
 
     // Oscilloscope SPSC ring buffer
     let rb             = ringbuf::HeapRb::<(f32, f32)>::new(OSC_SIZE);
@@ -44,6 +49,11 @@ fn main() {
         is_playing:   Arc::clone(&is_playing),
         eq_tx:        eq_tx.clone(),
         compressor_tx: comp_tx.clone(),
+        reverb_tx:    reverb_tx.clone(),
+        delay_tx:     delay_tx.clone(),
+        chorus_tx:    chorus_tx.clone(),
+        flanger_tx:   flanger_tx.clone(),
+        distort_tx:   distort_tx.clone(),
         compressor_gr: Arc::clone(&comp_gr),
         peaks:        Arc::clone(&peaks),
         osc_consumer: Arc::new(Mutex::new(osc_cons)),
@@ -61,6 +71,11 @@ fn main() {
             is_playing,
             eq_rx,
             comp_rx,
+            reverb_rx,
+            delay_rx,
+            chorus_rx,
+            flanger_rx,
+            distort_rx,
             comp_gr,
             peaks,
             osc_prod,
@@ -76,6 +91,11 @@ fn main() {
             seek_audio,
             update_eq_bands,
             update_compressor,
+            update_reverb,
+            update_delay,
+            update_chorus,
+            update_flanger,
+            update_distort,
             get_compressor_meter,
             get_meter_levels,
             get_playback_info,

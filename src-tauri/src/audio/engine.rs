@@ -3,9 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use crossbeam_channel::Receiver;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::state::{AudioData, BandConfig, CompressorConfig, Peaks, NO_SEEK};
+use super::state::{AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig, Peaks, NO_SEEK};
 use super::eq::EqCh;
 use super::fx::compressor::Compressor;
+use super::fx::reverb::Reverb;
+use super::fx::delay::Delay;
+use super::fx::chorus::Chorus;
+use super::fx::flanger::Flanger;
+use super::fx::distort::Distort;
 
 pub fn audio_thread(
     audio_data:   Arc<Mutex<Arc<AudioData>>>,
@@ -14,6 +19,11 @@ pub fn audio_thread(
     is_playing:   Arc<AtomicBool>,
     eq_rx:        Receiver<Vec<BandConfig>>,
     comp_rx:      Receiver<CompressorConfig>,
+    reverb_rx:    Receiver<ReverbConfig>,
+    delay_rx:     Receiver<DelayConfig>,
+    chorus_rx:    Receiver<ChorusConfig>,
+    flanger_rx:   Receiver<FlangerConfig>,
+    distort_rx:   Receiver<DistortConfig>,
     comp_gr:      Arc<AtomicU32>,
     peaks:        Arc<Peaks>,
     mut osc_prod: ringbuf::HeapProducer<(f32, f32)>,
@@ -31,6 +41,12 @@ pub fn audio_thread(
 
     let mut compressor = Compressor::new(out_sr);
     let mut cur_comp   = CompressorConfig::default();
+
+    let mut reverb     = Reverb::new(out_sr);
+    let mut delay      = Delay::new(out_sr);
+    let mut chorus     = Chorus::new(out_sr);
+    let mut flanger    = Flanger::new(out_sr);
+    let mut distort    = Distort::new(out_sr);
 
     // Local snapshot of AudioData Arc — refreshed cheaply without blocking.
     let mut local_data: Arc<AudioData> = Arc::new(AudioData::default());
@@ -52,6 +68,21 @@ pub fn audio_thread(
             }
             while let Ok(comp) = comp_rx.try_recv() {
                 cur_comp = comp;
+            }
+            while let Ok(rev) = reverb_rx.try_recv() {
+                reverb.set_config(rev);
+            }
+            while let Ok(del) = delay_rx.try_recv() {
+                delay.set_config(del);
+            }
+            while let Ok(cho) = chorus_rx.try_recv() {
+                chorus.set_config(cho);
+            }
+            while let Ok(fla) = flanger_rx.try_recv() {
+                flanger.set_config(fla);
+            }
+            while let Ok(dis) = distort_rx.try_recv() {
+                distort.set_config(dis);
             }
 
             // ── Step 2: Snapshot audio data Arc (brief lock, just ptr swap) ─
@@ -125,6 +156,21 @@ pub fn audio_thread(
 
                 // Apply Compressor
                 let (lout, rout) = compressor.process(lout, rout, &cur_comp);
+
+                // Apply Distort
+                let (lout, rout) = distort.process(lout, rout);
+
+                // Apply Flanger
+                let (lout, rout) = flanger.process(lout, rout);
+
+                // Apply Chorus
+                let (lout, rout) = chorus.process(lout, rout);
+
+                // Apply Delay
+                let (lout, rout) = delay.process(lout, rout);
+
+                // Apply Reverb
+                let (lout, rout) = reverb.process(lout, rout);
 
                 let mid  = (lout + rout) * 0.70710678;
                 let side = (lout - rout) * 0.70710678;

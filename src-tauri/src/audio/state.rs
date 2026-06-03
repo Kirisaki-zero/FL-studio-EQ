@@ -42,6 +42,119 @@ impl Default for CompressorConfig {
     }
 }
 
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct ReverbConfig {
+    pub size: f32,
+    pub damp: f32,
+    pub diff: f32,
+    pub width: f32,
+    pub wet: f32,
+    pub pre: f32, // milliseconds
+    pub bypassed: bool,
+}
+
+impl Default for ReverbConfig {
+    fn default() -> Self {
+        Self {
+            size: 0.65,
+            damp: 0.4,
+            diff: 0.8,
+            width: 1.0,
+            wet: 0.2,
+            pre: 20.0,
+            bypassed: false,
+        }
+    }
+}
+
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct DelayConfig {
+    pub time: f32,
+    pub feed: f32,
+    pub sync: f32,
+    pub pan: f32,
+    pub cut: f32,
+    pub wet: f32,
+    pub bypassed: bool,
+}
+
+impl Default for DelayConfig {
+    fn default() -> Self {
+        Self {
+            time: 375.0,
+            feed: 0.45,
+            sync: 0.0,
+            pan: 0.0,
+            cut: 2000.0,
+            wet: 0.25,
+            bypassed: false,
+        }
+    }
+}
+
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct ChorusConfig {
+    pub depth: f32,
+    pub rate: f32,
+    pub phase: f32,
+    pub wet: f32,
+    pub bypassed: bool,
+}
+
+impl Default for ChorusConfig {
+    fn default() -> Self {
+        Self {
+            depth: 0.5,
+            rate: 0.3,
+            phase: 90.0,
+            wet: 0.4,
+            bypassed: false,
+        }
+    }
+}
+
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct FlangerConfig {
+    pub depth: f32,
+    pub rate: f32,
+    pub feed: f32,
+    pub wet: f32,
+    pub bypassed: bool,
+}
+
+impl Default for FlangerConfig {
+    fn default() -> Self {
+        Self {
+            depth: 0.6,
+            rate: 0.5,
+            feed: 0.3,
+            wet: 0.35,
+            bypassed: false,
+        }
+    }
+}
+
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct DistortConfig {
+    pub drive: f32,
+    pub tone: f32,
+    pub dist_type: f32,
+    pub mix: f32,
+    pub bypassed: bool,
+}
+
+impl Default for DistortConfig {
+    fn default() -> Self {
+        Self {
+            drive: 0.4,
+            tone: 0.5,
+            dist_type: 0.0,
+            mix: 0.3,
+            bypassed: false,
+        }
+    }
+}
+
 /// Decoded PCM audio data — mapped to a temporary file via mmap.
 /// Wrapped in Arc so the audio thread can read it without a lock after swap.
 pub struct AudioData {
@@ -93,9 +206,20 @@ pub struct AppState {
     pub play_pos: Arc<AtomicU64>,
     pub seek_pos: Arc<AtomicU64>,
     pub is_playing: Arc<AtomicBool>,
+
+    // Channels to audio thread
     pub eq_tx: Sender<Vec<BandConfig>>,
     pub compressor_tx: Sender<CompressorConfig>,
-    pub compressor_gr: Arc<AtomicU32>, // To store latest Gain Reduction (dB)
+    pub reverb_tx: Sender<ReverbConfig>,
+    pub delay_tx: Sender<DelayConfig>,
+    pub chorus_tx: Sender<ChorusConfig>,
+    pub flanger_tx: Sender<FlangerConfig>,
+    pub distort_tx: Sender<DistortConfig>,
+    
+    // Compressor feedback
+    pub compressor_gr: Arc<AtomicU32>,
+
+    // Data feedback
     pub peaks: Arc<Peaks>,
     pub osc_consumer: Arc<Mutex<ringbuf::HeapConsumer<(f32, f32)>>>,
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use claxon::FlacReader;
 
-use super::state::{AppState, AudioData, BandConfig, CompressorConfig};
+use super::state::{AppState, AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig};
 
 #[tauri::command]
 pub fn play_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -130,6 +130,31 @@ pub fn update_eq_bands(bands: Vec<BandConfig>, state: tauri::State<'_, AppState>
 #[tauri::command]
 pub fn update_compressor(config: CompressorConfig, state: tauri::State<'_, AppState>) {
     let _ = state.compressor_tx.send(config);
+}
+
+#[tauri::command]
+pub fn update_reverb(config: ReverbConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.reverb_tx.send(config);
+}
+
+#[tauri::command]
+pub fn update_delay(config: DelayConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.delay_tx.send(config);
+}
+
+#[tauri::command]
+pub fn update_chorus(config: ChorusConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.chorus_tx.send(config);
+}
+
+#[tauri::command]
+pub fn update_flanger(config: FlangerConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.flanger_tx.send(config);
+}
+
+#[tauri::command]
+pub fn update_distort(config: DistortConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.distort_tx.send(config);
 }
 
 #[tauri::command]
