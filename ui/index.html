@@ -987,6 +987,8 @@ setInterval(async () => {
         realOscL = oscData[0] || [];
         realOscR = oscData[1] || [];
       }
+      
+      realCompGR = await window.__TAURI__.core.invoke('get_compressor_meter');
     } catch(e){}
   }
 }, 20);
@@ -1207,7 +1209,25 @@ const compParams=[
   {lbl:'KNEE',val:6,min:0,max:24,step:1,unit:'dB',color:'#ef9f27',angle:-10},
   {lbl:'MAKEUP',val:3,min:-12,max:24,step:0.5,unit:'dB',color:'#97c459',angle:15},
 ];
-function toggleCompBypass(){compBypassed=!compBypassed;document.getElementById('compBypassBtn').className='pill '+(compBypassed?'pill-on':'pill-off');showToast(compBypassed?'Comp bypassed':'Comp aktif');}
+let realCompGR = 0;
+
+function syncCompressor() {
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('update_compressor', {
+      config: {
+        thresh: compParams[0].val,
+        ratio: compParams[1].val,
+        attack: compParams[2].val,
+        release: compParams[3].val,
+        knee: compParams[4].val,
+        makeup: compParams[5].val,
+        bypassed: compBypassed
+      }
+    });
+  }
+}
+
+function toggleCompBypass(){compBypassed=!compBypassed;document.getElementById('compBypassBtn').className='pill '+(compBypassed?'pill-on':'pill-off');showToast(compBypassed?'Comp bypassed':'Comp aktif'); syncCompressor();}
 function drawCompCanvas(){
   const cv=document.getElementById('compCV');if(!cv)return;
   const ctx=cv.getContext('2d');const W=cv.width,H=cv.height;
@@ -1247,7 +1267,7 @@ function drawCompCanvas(){
   }
   // labels
   ctx.fillStyle='#6b7399';ctx.font='7px JetBrains Mono,monospace';ctx.fillText('IN (dBFS)',W-44,H-3);ctx.fillText('OUT',3,10);
-  document.getElementById('grTxt').textContent=`GR: ${(Math.random()*3).toFixed(1)} dB · Ratio ${compParams[1].val}:1 · Thresh ${compParams[0].val}dB`;
+  document.getElementById('grTxt').textContent=`GR: ${(realCompGR || 0).toFixed(1)} dB · Ratio ${compParams[1].val}:1 · Thresh ${compParams[0].val}dB`;
 }
 function buildCompKnobs(){
   const c=document.getElementById('compKnobs');if(!c)return;c.innerHTML='';
@@ -1256,7 +1276,7 @@ function buildCompKnobs(){
     wrap.innerHTML=`<div class="cknob" id="ck${mi}"><div class="cknob-dot" style="background:${m.color};transform:translateX(-50%) rotate(${m.angle}deg)" id="cd${mi}"></div></div><div class="cknob-lbl">${m.lbl}</div><div class="cknob-val" id="cv${mi}">${m.val}${m.unit}</div>`;
     const knob=wrap.querySelector('.cknob');let sy=0,sa=m.angle,kd=false;
     knob.addEventListener('pointerdown',e=>{kd=true;sy=e.clientY;sa=m.angle;knob.setPointerCapture(e.pointerId);e.stopPropagation();});
-    knob.addEventListener('pointermove',e=>{if(!kd)return;const dy=sy-e.clientY;m.angle=Math.max(-135,Math.min(135,sa+dy*2));document.getElementById('cd'+mi).style.transform=`translateX(-50%) rotate(${m.angle}deg)`;const norm=(m.angle+135)/270;m.val=Math.round((m.min+norm*(m.max-m.min))/m.step)*m.step;document.getElementById('cv'+mi).textContent=m.val+m.unit;drawCompCanvas();});
+    knob.addEventListener('pointermove',e=>{if(!kd)return;const dy=sy-e.clientY;m.angle=Math.max(-135,Math.min(135,sa+dy*2));document.getElementById('cd'+mi).style.transform=`translateX(-50%) rotate(${m.angle}deg)`;const norm=(m.angle+135)/270;m.val=Math.round((m.min+norm*(m.max-m.min))/m.step)*m.step;document.getElementById('cv'+mi).textContent=m.val+m.unit;drawCompCanvas();syncCompressor();});
     knob.addEventListener('pointerup',()=>kd=false);
     c.appendChild(wrap);
   });
@@ -1264,10 +1284,8 @@ function buildCompKnobs(){
 }
 
 // GR meter animation
-let grPhase=0;
 function animGR(){
-  grPhase+=0.07;
-  const gr=compBypassed?0:Math.max(0,2+Math.sin(grPhase)*8+Math.random()*3);
+  const gr=compBypassed?0:Math.max(0,realCompGR||0);
   const pct=Math.min(100,gr/24*100);
   const fill=document.getElementById('grFill');if(fill)fill.style.width=pct+'%';
 }
@@ -1837,7 +1855,7 @@ buildBstrip();updateKnobs();drawEQ();initEquo();buildFaders();buildPlugins();
 buildPresetGrid();buildQuickPresets();
 buildMixer();
 renderLagu();
-buildCompKnobs();
+buildCompKnobs(); syncCompressor();
 buildFxParams();buildPiano();
 drawWaveformSim();
 requestAnimationFrame(mainLoop);

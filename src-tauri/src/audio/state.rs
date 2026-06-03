@@ -17,6 +17,31 @@ pub struct BandConfig {
     pub muted: bool,
 }
 
+#[derive(Clone, serde::Deserialize, PartialEq, Debug)]
+pub struct CompressorConfig {
+    pub thresh: f32,
+    pub ratio: f32,
+    pub attack: f32,
+    pub release: f32,
+    pub knee: f32,
+    pub makeup: f32,
+    pub bypassed: bool,
+}
+
+impl Default for CompressorConfig {
+    fn default() -> Self {
+        Self {
+            thresh: -18.0,
+            ratio: 4.0,
+            attack: 10.0,
+            release: 150.0,
+            knee: 6.0,
+            makeup: 3.0,
+            bypassed: false,
+        }
+    }
+}
+
 /// Decoded PCM audio data — mapped to a temporary file via mmap.
 /// Wrapped in Arc so the audio thread can read it without a lock after swap.
 pub struct AudioData {
@@ -69,6 +94,8 @@ pub struct AppState {
     pub seek_pos: Arc<AtomicU64>,
     pub is_playing: Arc<AtomicBool>,
     pub eq_tx: Sender<Vec<BandConfig>>,
+    pub compressor_tx: Sender<CompressorConfig>,
+    pub compressor_gr: Arc<AtomicU32>, // To store latest Gain Reduction (dB)
     pub peaks: Arc<Peaks>,
     pub osc_consumer: Arc<Mutex<ringbuf::HeapConsumer<(f32, f32)>>>,
 }

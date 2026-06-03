@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use claxon::FlacReader;
 
-use super::state::{AppState, AudioData, BandConfig};
+use super::state::{AppState, AudioData, BandConfig, CompressorConfig};
 
 #[tauri::command]
 pub fn play_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
@@ -125,6 +125,16 @@ pub fn seek_audio(frame: u64, state: tauri::State<'_, AppState>) {
 #[tauri::command]
 pub fn update_eq_bands(bands: Vec<BandConfig>, state: tauri::State<'_, AppState>) {
     let _ = state.eq_tx.send(bands);
+}
+
+#[tauri::command]
+pub fn update_compressor(config: CompressorConfig, state: tauri::State<'_, AppState>) {
+    let _ = state.compressor_tx.send(config);
+}
+
+#[tauri::command]
+pub fn get_compressor_meter(state: tauri::State<'_, AppState>) -> f32 {
+    f32::from_bits(state.compressor_gr.load(Ordering::Relaxed))
 }
 
 #[tauri::command]

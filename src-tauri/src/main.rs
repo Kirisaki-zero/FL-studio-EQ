@@ -23,6 +23,7 @@ fn main() {
 
     // Lock-free communication channels
     let (eq_tx, eq_rx) = unbounded::<Vec<BandConfig>>();
+    let (comp_tx, comp_rx) = unbounded::<CompressorConfig>();
 
     // Oscilloscope SPSC ring buffer
     let rb             = ringbuf::HeapRb::<(f32, f32)>::new(OSC_SIZE);
@@ -34,6 +35,7 @@ fn main() {
     let play_pos   = Arc::new(AtomicU64::new(0));
     let seek_pos   = Arc::new(AtomicU64::new(NO_SEEK));
     let is_playing = Arc::new(AtomicBool::new(false));
+    let comp_gr    = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let state = AppState {
         audio_data:   Arc::clone(&audio_data),
@@ -41,6 +43,8 @@ fn main() {
         seek_pos:     Arc::clone(&seek_pos),
         is_playing:   Arc::clone(&is_playing),
         eq_tx:        eq_tx.clone(),
+        compressor_tx: comp_tx.clone(),
+        compressor_gr: Arc::clone(&comp_gr),
         peaks:        Arc::clone(&peaks),
         osc_consumer: Arc::new(Mutex::new(osc_cons)),
     };
@@ -56,6 +60,8 @@ fn main() {
             seek_pos,
             is_playing,
             eq_rx,
+            comp_rx,
+            comp_gr,
             peaks,
             osc_prod,
         );
@@ -69,6 +75,8 @@ fn main() {
             pause_audio,
             seek_audio,
             update_eq_bands,
+            update_compressor,
+            get_compressor_meter,
             get_meter_levels,
             get_playback_info,
             get_oscilloscope_data,

@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use crossbeam_channel::Receiver;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::state::{AudioData, BandConfig, Peaks, NO_SEEK};
+use super::state::{AudioData, BandConfig, CompressorConfig, Peaks, NO_SEEK};
 use super::eq::EqCh;
+use super::fx::compressor::Compressor;
 
 pub fn audio_thread(
     audio_data:   Arc<Mutex<Arc<AudioData>>>,
@@ -12,6 +13,8 @@ pub fn audio_thread(
     seek_pos:     Arc<AtomicU64>,
     is_playing:   Arc<AtomicBool>,
     eq_rx:        Receiver<Vec<BandConfig>>,
+    comp_rx:      Receiver<CompressorConfig>,
+    comp_gr:      Arc<AtomicU32>,
     peaks:        Arc<Peaks>,
     mut osc_prod: ringbuf::HeapProducer<(f32, f32)>,
 ) {
@@ -26,6 +29,9 @@ pub fn audio_thread(
     let mut eq_r       = EqCh::new(out_sr);
     let mut cur_bands  = Vec::<BandConfig>::new();
 
+    let mut compressor = Compressor::new(out_sr);
+    let mut cur_comp   = CompressorConfig::default();
+
     // Local snapshot of AudioData Arc — refreshed cheaply without blocking.
     let mut local_data: Arc<AudioData> = Arc::new(AudioData::default());
 
@@ -36,13 +42,16 @@ pub fn audio_thread(
     let stream = device.build_output_stream(
         &config,
         move |data: &mut [f32], _| {
-            // ── Step 1: Receive EQ updates (non-blocking) ─────────────────
+            // ── Step 1: Receive Config updates (non-blocking) ─────────────
             while let Ok(bands) = eq_rx.try_recv() {
                 if bands != cur_bands {
                     cur_bands = bands;
                     eq_l.update(&cur_bands);
                     eq_r.update(&cur_bands);
                 }
+            }
+            while let Ok(comp) = comp_rx.try_recv() {
+                cur_comp = comp;
             }
 
             // ── Step 2: Snapshot audio data Arc (brief lock, just ptr swap) ─
@@ -113,6 +122,10 @@ pub fn audio_thread(
                 // Apply EQ
                 let lout = eq_l.run(lin);
                 let rout = eq_r.run(rin);
+
+                // Apply Compressor
+                let (lout, rout) = compressor.process(lout, rout, &cur_comp);
+
                 let mid  = (lout + rout) * 0.70710678;
                 let side = (lout - rout) * 0.70710678;
 
@@ -135,6 +148,9 @@ pub fn audio_thread(
 
             // Publish position for UI display
             play_pos.store(local_pos as u64, Ordering::Relaxed);
+            
+            // Publish Gain Reduction for Compressor UI Meter
+            comp_gr.store(compressor.gr_db.to_bits(), Ordering::Relaxed);
         },
         |err| eprintln!("Audio stream error: {err}"),
         None,
