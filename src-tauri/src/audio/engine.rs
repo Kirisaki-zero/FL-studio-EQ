@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use crossbeam_channel::Receiver;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use super::state::{AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig, Peaks, NO_SEEK};
+use super::state::{AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig, Peaks, NO_SEEK, MidiEvent};
 use super::eq::EqCh;
 use super::fx::compressor::Compressor;
 use super::fx::reverb::Reverb;
@@ -11,6 +11,7 @@ use super::fx::delay::Delay;
 use super::fx::chorus::Chorus;
 use super::fx::flanger::Flanger;
 use super::fx::distort::Distort;
+use super::synth::MidiSynth;
 
 pub fn audio_thread(
     audio_data:   Arc<Mutex<Arc<AudioData>>>,
@@ -24,6 +25,7 @@ pub fn audio_thread(
     chorus_rx:    Receiver<ChorusConfig>,
     flanger_rx:   Receiver<FlangerConfig>,
     distort_rx:   Receiver<DistortConfig>,
+    midi_rx:      Receiver<MidiEvent>,
     comp_gr:      Arc<AtomicU32>,
     peaks:        Arc<Peaks>,
     mut osc_prod: ringbuf::HeapProducer<(f32, f32)>,
@@ -47,6 +49,7 @@ pub fn audio_thread(
     let mut chorus     = Chorus::new(out_sr);
     let mut flanger    = Flanger::new(out_sr);
     let mut distort    = Distort::new(out_sr);
+    let mut synth      = MidiSynth::new(out_sr);
 
     // Local snapshot of AudioData Arc — refreshed cheaply without blocking.
     let mut local_data: Arc<AudioData> = Arc::new(AudioData::default());
@@ -84,12 +87,25 @@ pub fn audio_thread(
             while let Ok(dis) = distort_rx.try_recv() {
                 distort.set_config(dis);
             }
+            while let Ok(evt) = midi_rx.try_recv() {
+                match evt {
+                    MidiEvent::NoteOn(note) => synth.note_on(note),
+                    MidiEvent::NoteOff(note) => synth.note_off(note),
+                    MidiEvent::SetBypass(bypassed) => synth.set_bypass(bypassed),
+                }
+            }
 
             // ── Step 2: Snapshot audio data Arc (brief lock, just ptr swap) ─
             if let Ok(guard) = audio_data.try_lock() {
                 if !Arc::ptr_eq(&*guard, &local_data) {
                     local_data = Arc::clone(&*guard);
                     local_pos  = 0.0;
+                    println!(
+                        "New audio loaded: sample_rate={}, channels={}, out_sr={}",
+                        local_data.sample_rate,
+                        local_data.channels,
+                        out_sr
+                    );
                 }
             }
 
@@ -100,9 +116,14 @@ pub fn audio_thread(
                 seek_pos.store(NO_SEEK, Ordering::Relaxed); // acknowledge
             }
 
-            // ── Step 4: Output silence if not playing ─────────────────────
-            if !is_playing.load(Ordering::Relaxed) || local_data.samples_len == 0 {
+            let file_playing = is_playing.load(Ordering::Relaxed) && local_data.samples_len > 0;
+            let synth_active = synth.is_active();
+
+            if !file_playing && !synth_active {
                 for s in data.iter_mut() { *s = 0.0; }
+                // Publish position for UI display
+                play_pos.store(local_pos as u64, Ordering::Relaxed);
+                comp_gr.store(compressor.gr_db.to_bits(), Ordering::Relaxed);
                 return;
             }
 
@@ -124,31 +145,46 @@ pub fn audio_thread(
 
             // ── Step 5: Render audio frames ───────────────────────────────
             for frame in data.chunks_mut(out_ch) {
-                let pi   = local_pos as usize;
-                let frac = (local_pos - pi as f64) as f32;
+                let mut lin = 0.0;
+                let mut rin = 0.0;
 
-                // End of audio
-                if pi * src_ch >= src_total {
-                    is_playing.store(false, Ordering::Relaxed);
-                    for s in frame.iter_mut() { *s = 0.0; }
-                    continue;
+                // 1. Process Audio File if playing
+                if file_playing {
+                    let pi   = local_pos as usize;
+                    let frac = (local_pos - pi as f64) as f32;
+
+                    // End of audio file
+                    if pi * src_ch >= src_total {
+                        is_playing.store(false, Ordering::Relaxed);
+                    } else {
+                        // Linear interpolation (L channel)
+                        let file_l = {
+                            let s0 = get_s(pi, 0);
+                            let s1 = get_s(pi + 1, 0);
+                            s0 + (s1 - s0) * frac
+                        };
+
+                        // Linear interpolation (R channel, or duplicate L if mono)
+                        let file_r = if src_ch > 1 {
+                            let s0 = get_s(pi, 1);
+                            let s1 = get_s(pi + 1, 1);
+                            s0 + (s1 - s0) * frac
+                        } else {
+                            file_l
+                        };
+
+                        lin += file_l;
+                        rin += file_r;
+                        local_pos += ratio;
+                    }
                 }
 
-                // Linear interpolation (L channel)
-                let lin = {
-                    let s0 = get_s(pi, 0);
-                    let s1 = get_s(pi + 1, 0);
-                    s0 + (s1 - s0) * frac
-                };
-
-                // Linear interpolation (R channel, or duplicate L if mono)
-                let rin = if src_ch > 1 {
-                    let s0 = get_s(pi, 1);
-                    let s1 = get_s(pi + 1, 1);
-                    s0 + (s1 - s0) * frac
-                } else {
-                    lin
-                };
+                // 2. Process MIDI Synth if active
+                if synth_active {
+                    let (synth_l, synth_r) = synth.process();
+                    lin += synth_l;
+                    rin += synth_r;
+                }
 
                 // Apply EQ
                 let lout = eq_l.run(lin);
@@ -187,9 +223,6 @@ pub fn audio_thread(
 
                 // Push to oscilloscope ring buffer (lock-free SPSC)
                 osc_prod.push((lout, rout)).ok();
-
-                // Advance position
-                local_pos += ratio;
             }
 
             // Publish position for UI display

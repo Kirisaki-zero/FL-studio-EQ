@@ -491,7 +491,7 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
       <div class="fxtab" id="fxTabChorus" onclick="switchFxTab('chorus',this)">Chorus</div>
       <div class="fxtab" id="fxTabFlange" onclick="switchFxTab('flange',this)">Flanger</div>
       <div class="fxtab" id="fxTabDist" onclick="switchFxTab('dist',this)">Distort</div>
-      <div class="pill pill-on" id="fxBypassBtn" onclick="toggleFxBypass()" style="margin-left:auto;font-size:9px">Aktif</div>
+      <div class="pill pill-off" id="fxBypassBtn" onclick="toggleFxBypass()" style="margin-left:auto;font-size:9px">Mati</div>
     </div>
     <canvas id="reverbCV" width="338" height="72" style="width:100%;height:72px"></canvas>
     <div class="fx-params" id="fxParams"></div>
@@ -502,7 +502,8 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
   <div class="midi-wrap">
     <div class="midi-head">
       <span id="midiNote">—</span>
-      <div style="margin-left:auto;display:flex;gap:4px">
+      <div style="margin-left:auto;display:flex;gap:4px;align-items:center">
+        <div class="pill pill-off" id="midiBypassBtn" onclick="toggleMidiBypass()" style="font-size:9px">Mati</div>
         <div class="pill pill-off" id="midiOctBtn" onclick="changeOct(-1)">Oct-</div>
         <div style="font-size:9px;color:var(--acc2);font-family:'JetBrains Mono',monospace;padding:3px 6px">C<span id="midiOct">4</span></div>
         <div class="pill pill-off" id="midiOctBtn2" onclick="changeOct(1)">Oct+</div>
@@ -676,12 +677,9 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
   <div style="display:flex;align-items:center;justify-content:space-between;padding:0 12px 8px">
     <span style="font-size:9px;color:var(--txt4);font-family:'JetBrains Mono',monospace" id="laguCount">0 lagu</span>
     <div style="display:flex;gap:5px">
-      <label for="flacInput" style="cursor:pointer">
-        <div class="pill pill-on" style="display:flex;align-items:center;gap:3px;padding:3px 9px;font-size:9px">
-          <i class="ti ti-plus" style="font-size:11px"></i> Tambah
-        </div>
-      </label>
-      <input type="file" id="flacInput" accept=".flac,.mp3,.wav,.aac,.ogg,.m4a" multiple style="display:none">
+      <div class="pill pill-on" style="display:flex;align-items:center;gap:3px;padding:3px 9px;font-size:9px;cursor:pointer" onclick="openFilePicker()">
+        <i class="ti ti-plus" style="font-size:11px"></i> Tambah
+      </div>
       <div class="pill pill-off" style="font-size:9px;padding:3px 8px" onclick="clearLagu()">Hapus Semua</div>
     </div>
   </div>
@@ -690,10 +688,26 @@ canvas#gonioCV{display:block;background:#08090f;border-radius:50%;flex-shrink:0;
     <div style="font-size:11px;color:var(--txt4);font-family:'JetBrains Mono',monospace;text-align:center">Belum ada lagu<br>Tap + Tambah untuk memilih file audio</div>
   </div>
   <div id="laguList" style="display:none;flex-direction:column;gap:5px;padding:0 12px 14px"></div>
-  <!-- waveform preview -->
+  <!-- waveform preview & playback controls -->
   <div style="margin:0 12px 10px;background:var(--bg3);border-radius:10px;border:0.5px solid var(--border);overflow:hidden" id="waveWrap" style="display:none">
-    <div style="padding:6px 10px;border-bottom:0.5px solid var(--border);background:var(--bg2);font-size:9px;color:var(--txt4);font-family:'JetBrains Mono',monospace" id="waveTitle">Tidak ada lagu diputar</div>
+    <div style="padding:6px 10px;border-bottom:0.5px solid var(--border);background:var(--bg2);font-size:9px;color:var(--txt4);font-family:'JetBrains Mono',monospace;display:flex;justify-content:space-between;align-items:center;">
+      <span id="waveTitle">Tidak ada lagu diputar</span>
+      <span id="waveTime" style="color:var(--txt3)">0:00 / 0:00</span>
+    </div>
     <canvas id="waveCV" width="314" height="40" style="width:100%;height:40px;display:block;background:var(--bg2)"></canvas>
+    <div style="padding:8px 10px;background:var(--bg2);display:flex;flex-direction:column;gap:8px;">
+      <!-- Seekbar -->
+      <div id="seekBarContainer" style="width:100%;height:4px;background:var(--bg4);border-radius:2px;cursor:pointer;position:relative;" onclick="seekToClick(event)">
+        <div id="seekBarFill" style="height:100%;width:0%;background:var(--acc2);border-radius:2px;pointer-events:none;"></div>
+      </div>
+      <!-- Controls -->
+      <div style="display:flex;justify-content:center;gap:15px;align-items:center;">
+        <i class="ti ti-player-skip-back" style="color:var(--txt3);font-size:16px;cursor:pointer;" onclick="prevLagu()"></i>
+        <i class="ti ti-player-stop" style="color:var(--red);font-size:16px;cursor:pointer;" onclick="stopLagu()"></i>
+        <i class="ti ti-player-pause" id="playPauseBtn" style="color:var(--acc2);font-size:20px;cursor:pointer;" onclick="togglePauseLagu()"></i>
+        <i class="ti ti-player-skip-forward" style="color:var(--txt3);font-size:16px;cursor:pointer;" onclick="nextLagu()"></i>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1318,7 +1332,7 @@ function switchFxTab(tab,el){
   syncFX();
 }
 
-let fxBypassed = { rev: false, delay: false, chorus: false, flange: false, dist: false };
+let fxBypassed = { rev: true, delay: true, chorus: true, flange: true, dist: true };
 
 function toggleFxBypass() {
   fxBypassed[currentFxTab] = !fxBypassed[currentFxTab];
@@ -1442,6 +1456,20 @@ function buildPiano(){
     });
   }
 }
+let midiBypassed = true;
+function toggleMidiBypass() {
+  midiBypassed = !midiBypassed;
+  const btn = document.getElementById('midiBypassBtn');
+  if (btn) {
+    btn.className = 'pill ' + (midiBypassed ? 'pill-off' : 'pill-on');
+    btn.textContent = midiBypassed ? 'Mati' : 'Aktif';
+  }
+  showToast(midiBypassed ? 'MIDI Piano dinonaktifkan' : 'MIDI Piano diaktifkan');
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('update_midi_bypass', { bypassed: midiBypassed }).catch(console.error);
+  }
+}
+
 function playMidiNote(midi,key,on){
   const noteName=noteNames[midi%12]+(Math.floor(midi/12)-1);
   document.getElementById('midiNote').textContent=on?('♪ '+noteName+' · '+midi+'Hz approx'):'—';
@@ -1450,6 +1478,10 @@ function playMidiNote(midi,key,on){
     if(midiNotes.length>20)midiNotes.shift();
     midiNotes.push({note:midi,time:Date.now(),dur:300,active:true});
   } else {key.classList.remove('note-on');}
+
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('play_midi_note', { note: midi, on: on }).catch(console.error);
+  }
 }
 function changeOct(d){currentOctave=Math.max(1,Math.min(7,currentOctave+d));document.getElementById('midiOct').textContent=currentOctave;buildPiano();showToast('Octave: C'+currentOctave);}
 function drawMidiRoll(){
@@ -1819,8 +1851,14 @@ function drawRoutingMap(){
 // ===========================
 // LAGU
 // ===========================
-let laguData=[],playingIdx=-1,audioObj=null;
-function formatSize(b){return b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';}
+// ===========================
+// LAGU
+// ===========================
+let laguData=[],playingIdx=-1,isPaused=false;
+let playbackPoller = null;
+let totalFrames = 0;
+let sampleRate = 48000;
+
 function formatExt(n){return n.split('.').pop().toUpperCase();}
 function renderLagu(){
   const list=document.getElementById('laguList'),empty=document.getElementById('laguEmpty'),count=document.getElementById('laguCount');
@@ -1832,7 +1870,7 @@ function renderLagu(){
     const ext=formatExt(f.name);const isPlay=playingIdx===i;
     const extColor={FLAC:'#85b7eb',MP3:'#97c459',WAV:'#ef9f27',AAC:'#afa9ec',OGG:'#5dcaa5',M4A:'#afa9ec'}[ext]||'#6b7399';
     card.innerHTML=`<div class="lagu-ico"><i class="ti ${isPlay?'ti-player-pause':'ti-player-play'}" style="color:${isPlay?'#ff8a65':'var(--txt4)'};font-size:14px"></i></div>
-<div class="lagu-info"><div class="lagu-name">${f.name.replace(/\.[^.]+$/,'')}</div><div class="lagu-meta"><span style="color:${extColor}">${ext}</span> · ${formatSize(f.size)}</div></div>
+<div class="lagu-info"><div class="lagu-name">${f.name.replace(/\.[^.]+$/,'')}</div><div class="lagu-meta"><span style="color:${extColor}">${ext}</span></div></div>
 <div style="display:flex;gap:5px;align-items:center">
 <div class="lagu-btn" onclick="togglePlay(${i},event)"><i class="ti ${isPlay?'ti-player-stop':'ti-player-play'}" style="font-size:12px;color:var(--acc2)"></i></div>
 <div onclick="hapusLagu(${i},event)" style="cursor:pointer;padding:3px"><i class="ti ti-trash" style="font-size:12px;color:var(--txt4)"></i></div>
@@ -1840,27 +1878,177 @@ function renderLagu(){
     list.appendChild(card);
   });
 }
-function togglePlay(idx,e){
-  e.stopPropagation();if(audioObj){audioObj.pause();audioObj=null;}
-  if(playingIdx===idx){playingIdx=-1;renderLagu();document.getElementById('waveTitle').textContent='Tidak ada lagu diputar';showToast('Dihentikan');return;}
-  const f=laguData[idx];const url=URL.createObjectURL(f.file);audioObj=new Audio(url);
-  audioObj.play().catch(()=>showToast('Format tidak didukung'));
-  audioObj.onended=()=>{playingIdx=-1;renderLagu();};playingIdx=idx;renderLagu();
-  document.getElementById('waveTitle').textContent='▶ '+f.name.replace(/\.[^.]+$/,'');
-  showToast('▶ '+f.name.replace(/\.[^.]+$/,''));
-  drawWaveformSim();
+
+let isLoadingNewSong = false;
+
+async function togglePlay(idx,e){
+  if(e) e.stopPropagation();
+  if(!window.__TAURI__) return showToast('Tauri tidak terdeteksi');
+  
+  if(playingIdx===idx){
+    stopLagu();
+    return;
+  }
+  
+  try {
+    isLoadingNewSong = true;
+    const f=laguData[idx];
+    await window.__TAURI__.core.invoke('play_audio', { path: f.path });
+    playingIdx=idx;
+    isPaused=false;
+    renderLagu();
+    document.getElementById('waveTitle').textContent='▶ '+f.name.replace(/\.[^.]+$/,'');
+    document.getElementById('playPauseBtn').className = 'ti ti-player-pause';
+    showToast('▶ '+f.name.replace(/\.[^.]+$/,''));
+    startPlaybackPoller();
+  } catch(err) {
+    showToast('Error: ' + err);
+  }
 }
-function hapusLagu(idx,e){e.stopPropagation();if(playingIdx===idx&&audioObj){audioObj.pause();audioObj=null;playingIdx=-1;}laguData.splice(idx,1);if(playingIdx>idx)playingIdx--;renderLagu();showToast('Lagu dihapus');}
-function clearLagu(){if(audioObj){audioObj.pause();audioObj=null;}laguData=[];playingIdx=-1;renderLagu();showToast('Library dikosongkan');}
-document.getElementById('flacInput').addEventListener('change',function(){Array.from(this.files).forEach(f=>{if(!laguData.find(x=>x.name===f.name&&x.size===f.size))laguData.push({name:f.name,size:f.size,file:f});});this.value='';renderLagu();showToast('+'+this.files.length+' ditambahkan');});
-function drawWaveformSim(){
+
+async function togglePauseLagu() {
+  if (playingIdx === -1 || !window.__TAURI__) return;
+  try {
+    await window.__TAURI__.core.invoke('pause_audio');
+    isPaused = !isPaused;
+    document.getElementById('playPauseBtn').className = isPaused ? 'ti ti-player-play' : 'ti ti-player-pause';
+    renderLagu();
+  } catch(e) { console.error(e); }
+}
+
+async function stopLagu() {
+  if(!window.__TAURI__) return;
+  try {
+    if (!isPaused && playingIdx !== -1) {
+      await window.__TAURI__.core.invoke('pause_audio');
+    }
+    await window.__TAURI__.core.invoke('seek_audio', { frame: 0 });
+    playingIdx = -1;
+    isPaused = false;
+    stopPlaybackPoller();
+    renderLagu();
+    document.getElementById('waveTitle').textContent='Tidak ada lagu diputar';
+    document.getElementById('waveTime').textContent='0:00 / 0:00';
+    document.getElementById('seekBarFill').style.width = '0%';
+    document.getElementById('playPauseBtn').className = 'ti ti-player-pause';
+    
+    const cv=document.getElementById('waveCV');
+    const ctx=cv.getContext('2d');
+    ctx.fillStyle='#0e1117';ctx.fillRect(0,0,cv.width,cv.height);
+  } catch(e) { console.error(e); }
+}
+
+function prevLagu() {
+  if (playingIdx > 0) togglePlay(playingIdx - 1);
+}
+
+function nextLagu() {
+  if (playingIdx !== -1 && playingIdx < laguData.length - 1) {
+    togglePlay(playingIdx + 1);
+  } else {
+    stopLagu();
+  }
+}
+
+async function seekToClick(e) {
+  if (playingIdx === -1 || !window.__TAURI__) return;
+  const rect = document.getElementById('seekBarContainer').getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const frame = Math.floor(pct * totalFrames);
+  try {
+    await window.__TAURI__.core.invoke('seek_audio', { frame });
+  } catch(err) { console.error(err); }
+}
+
+function startPlaybackPoller() {
+  if (playbackPoller) clearInterval(playbackPoller);
+  let _prevPlaying = false;
+  playbackPoller = setInterval(async () => {
+    if (!window.__TAURI__) return;
+    try {
+      // --- Check for decode errors first ---
+      const decodeErr = await window.__TAURI__.core.invoke('get_decode_status');
+      if (decodeErr) {
+        showToast('❌ Gagal: ' + decodeErr);
+        stopLagu();
+        return;
+      }
+
+      const [playing, pos, total, sRate] = await window.__TAURI__.core.invoke('get_playback_info');
+      totalFrames = total;
+      sampleRate = sRate || 48000;
+
+      // Show confirmation toast the first time is_playing flips to true
+      if (playing && !_prevPlaying && total > 0) {
+        isLoadingNewSong = false;
+        showToast('▶ Audio berhasil dimuat & diputar');
+      }
+      _prevPlaying = playing;
+
+      const pct = totalFrames > 0 ? (pos / totalFrames) * 100 : 0;
+      document.getElementById('seekBarFill').style.width = pct + '%';
+
+      const posSec  = Math.floor(pos / sampleRate);
+      const totalSec = Math.floor(totalFrames / sampleRate);
+
+      const fmtTime = (s) => Math.floor(s/60) + ':' + (s%60).toString().padStart(2, '0');
+      document.getElementById('waveTime').textContent = fmtTime(posSec) + ' / ' + fmtTime(totalSec);
+
+      // Auto next (sequential, one by one)
+      if (!playing && !isPaused && pos >= totalFrames && totalFrames > 0 && !isLoadingNewSong) {
+        isLoadingNewSong = true; // Prevent rapid-fire skips
+        nextLagu();
+      }
+    } catch (e) {}
+  }, 200);
+}
+
+function stopPlaybackPoller() {
+  if (playbackPoller) {
+    clearInterval(playbackPoller);
+    playbackPoller = null;
+  }
+}
+
+function hapusLagu(idx,e){
+  e.stopPropagation();
+  if(playingIdx===idx) stopLagu();
+  laguData.splice(idx,1);
+  if(playingIdx>idx) playingIdx--;
+  renderLagu();
+  showToast('Lagu dihapus');
+}
+
+function clearLagu(){
+  stopLagu();
+  laguData=[];
+  renderLagu();
+  showToast('Library dikosongkan');
+}
+
+function drawWaveformReal() {
+  if (playingIdx === -1 || isPaused) return;
   const cv=document.getElementById('waveCV');if(!cv)return;
   const ctx=cv.getContext('2d');const W=cv.width,H=cv.height;
   ctx.fillStyle='#0e1117';ctx.fillRect(0,0,W,H);
+  
+  if (!realOscL || realOscL.length === 0) return;
+  
   ctx.beginPath();
-  for(let x=0;x<W;x++){const t=x/W*Math.PI*20;const amp=0.3+0.5*Math.sin(x/W*Math.PI);const y=H/2+Math.sin(t)*amp*H*0.45;x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
+  const step = Math.max(1, Math.floor(realOscL.length / W));
+  for(let x=0; x<W; x++) {
+    const val = realOscL[x * step] || 0;
+    const y = H/2 - (val * H * 0.45);
+    x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
   ctx.strokeStyle='#378add80';ctx.lineWidth=1;ctx.stroke();
-  ctx.beginPath();for(let x=0;x<W;x++){const t=x/W*Math.PI*20;const amp=0.2+0.4*Math.sin(x/W*Math.PI);const y=H/2+Math.sin(t+0.3)*amp*H*0.4;x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
+
+  ctx.beginPath();
+  for(let x=0; x<W; x++) {
+    const val = realOscR[x * step] || 0;
+    const y = H/2 - (val * H * 0.45);
+    x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
   ctx.strokeStyle='#ff8a6540';ctx.lineWidth=1;ctx.stroke();
 }
 
@@ -1892,16 +2080,26 @@ function mainLoop(ts){
   const eqVisible=eqTab&&eqTab.style.display!=='none';
   const fxVisible=fxTab&&fxTab.style.display!=='none';
 
+  const laguTab=document.getElementById('tabLagu');
+  const laguVisible=laguTab&&laguTab.style.display!=='none';
+
   if(eqVisible){
     drawSpectrum();
     animVU();
     drawOsc();
     drawGoniometer();
+  } else if (laguVisible) {
+    drawOsc(); // Need oscilloscope data for the waveform!
   }
+
   if(fxVisible){
     animGR();
     drawFXCanvas();
     drawMidiRoll();
+  }
+  
+  if (laguVisible) {
+    drawWaveformReal();
   }
   requestAnimationFrame(mainLoop);
 }
@@ -1915,7 +2113,6 @@ buildMixer();
 renderLagu();
 buildCompKnobs(); syncCompressor();
 buildFxParams(); syncFX(); buildPiano();
-drawWaveformSim();
 requestAnimationFrame(mainLoop);
 
 // --- TAURI INTEGRATION ---
@@ -1924,14 +2121,20 @@ async function openFilePicker() {
     try {
       const selected = await window.__TAURI__.core.invoke('plugin:dialog|open', {
         options: {
-          multiple: false,
+          multiple: true,
           filters: [{ name: 'Audio', extensions: ['flac', 'wav', 'mp3', 'ogg', 'aac', 'm4a'] }]
         }
       });
       if (selected) {
-        window.__TAURI__.core.invoke('play_audio', { path: selected })
-          .then(() => showToast('Playing: ' + selected.split(/[/\\]/).pop()))
-          .catch(e => showToast('Error: ' + e));
+        const files = Array.isArray(selected) ? selected : [selected];
+        files.forEach(path => {
+          const name = path.split(/[/\\]/).pop();
+          if (!laguData.find(x => x.path === path)) {
+            laguData.push({ name, path });
+          }
+        });
+        renderLagu();
+        showToast('+' + files.length + ' lagu ditambahkan');
       }
     } catch (e) {
       showToast('Error: ' + e);

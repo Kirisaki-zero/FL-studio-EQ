@@ -62,7 +62,7 @@ impl Default for ReverbConfig {
             width: 1.0,
             wet: 0.2,
             pre: 20.0,
-            bypassed: false,
+            bypassed: true,
         }
     }
 }
@@ -87,7 +87,7 @@ impl Default for DelayConfig {
             pan: 0.0,
             cut: 2000.0,
             wet: 0.25,
-            bypassed: false,
+            bypassed: true,
         }
     }
 }
@@ -108,7 +108,7 @@ impl Default for ChorusConfig {
             rate: 0.3,
             phase: 90.0,
             wet: 0.4,
-            bypassed: false,
+            bypassed: true,
         }
     }
 }
@@ -129,7 +129,7 @@ impl Default for FlangerConfig {
             rate: 0.5,
             feed: 0.3,
             wet: 0.35,
-            bypassed: false,
+            bypassed: true,
         }
     }
 }
@@ -150,7 +150,7 @@ impl Default for DistortConfig {
             tone: 0.5,
             dist_type: 0.0,
             mix: 0.3,
-            bypassed: false,
+            bypassed: true,
         }
     }
 }
@@ -172,6 +172,13 @@ impl Default for AudioData {
 
 pub struct Peaks {
     vals: [AtomicU32; 4],
+}
+
+#[derive(Clone, Debug)]
+pub enum MidiEvent {
+    NoteOn(u8),
+    NoteOff(u8),
+    SetBypass(bool),
 }
 
 impl Peaks {
@@ -215,6 +222,7 @@ pub struct AppState {
     pub chorus_tx: Sender<ChorusConfig>,
     pub flanger_tx: Sender<FlangerConfig>,
     pub distort_tx: Sender<DistortConfig>,
+    pub midi_tx: Sender<MidiEvent>,
     
     // Compressor feedback
     pub compressor_gr: Arc<AtomicU32>,
@@ -222,4 +230,7 @@ pub struct AppState {
     // Data feedback
     pub peaks: Arc<Peaks>,
     pub osc_consumer: Arc<Mutex<ringbuf::HeapConsumer<(f32, f32)>>>,
+
+    // Last decode error — set by background decode thread, read and cleared by UI poll
+    pub last_decode_error: Arc<Mutex<Option<String>>>,
 }

@@ -29,6 +29,7 @@ fn main() {
     let (chorus_tx, chorus_rx) = unbounded::<ChorusConfig>();
     let (flanger_tx, flanger_rx) = unbounded::<FlangerConfig>();
     let (distort_tx, distort_rx) = unbounded::<DistortConfig>();
+    let (midi_tx, midi_rx) = unbounded::<MidiEvent>();
 
     // Oscilloscope SPSC ring buffer
     let rb             = ringbuf::HeapRb::<(f32, f32)>::new(OSC_SIZE);
@@ -42,6 +43,8 @@ fn main() {
     let is_playing = Arc::new(AtomicBool::new(false));
     let comp_gr    = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
+    let last_decode_error = Arc::new(Mutex::new(None::<String>));
+
     let state = AppState {
         audio_data:   Arc::clone(&audio_data),
         play_pos:     Arc::clone(&play_pos),
@@ -54,9 +57,11 @@ fn main() {
         chorus_tx:    chorus_tx.clone(),
         flanger_tx:   flanger_tx.clone(),
         distort_tx:   distort_tx.clone(),
+        midi_tx:      midi_tx.clone(),
         compressor_gr: Arc::clone(&comp_gr),
         peaks:        Arc::clone(&peaks),
         osc_consumer: Arc::new(Mutex::new(osc_cons)),
+        last_decode_error: Arc::clone(&last_decode_error),
     };
 
     // Send initial EQ configuration to audio thread
@@ -76,6 +81,7 @@ fn main() {
             chorus_rx,
             flanger_rx,
             distort_rx,
+            midi_rx,
             comp_gr,
             peaks,
             osc_prod,
@@ -100,6 +106,9 @@ fn main() {
             get_meter_levels,
             get_playback_info,
             get_oscilloscope_data,
+            get_decode_status,
+            play_midi_note,
+            update_midi_bypass,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

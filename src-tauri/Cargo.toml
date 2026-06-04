@@ -3,9 +3,10 @@ name        = "audio_analyzer"
 version     = "0.1.0"
 edition     = "2021"
 description = "High-resolution audio signal analyzer with FFT and THD calculation"
+default-run = "fl_eq_studio"
 
 [dependencies]
-claxon              = "0.4"
+symphonia           = { version = "0.5.4", features = ["all"] }
 cpal                = "0.15"
 biquad              = "0.4.2"
 ringbuf             = "0.3"

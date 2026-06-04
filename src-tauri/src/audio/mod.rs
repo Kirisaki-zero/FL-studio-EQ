@@ -3,3 +3,4 @@ pub mod eq;
 pub mod engine;
 pub mod commands;
 pub mod fx;
+pub mod synth;

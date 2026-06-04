@@ -1,99 +1,105 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use claxon::FlacReader;
 
-use super::state::{AppState, AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig};
+use super::state::{AppState, AudioData, BandConfig, CompressorConfig, ReverbConfig, DelayConfig, ChorusConfig, FlangerConfig, DistortConfig, MidiEvent};
 
 #[tauri::command]
 pub fn play_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let audio_data = Arc::clone(&state.audio_data);
-    let play_pos   = Arc::clone(&state.play_pos);
-    let is_playing = Arc::clone(&state.is_playing);
+    let audio_data         = Arc::clone(&state.audio_data);
+    let play_pos           = Arc::clone(&state.play_pos);
+    let is_playing         = Arc::clone(&state.is_playing);
+    let last_decode_error  = Arc::clone(&state.last_decode_error);
 
     is_playing.store(false, Ordering::Relaxed);
+    // Clear any previous error so UI poller sees fresh state
+    *last_decode_error.lock().unwrap() = None;
 
     std::thread::spawn(move || {
         let result = (|| -> Result<Arc<AudioData>, String> {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-            
-            let mut magic = [0u8; 4];
-            if file.read_exact(&mut magic).is_ok() && &magic[0..3] == b"ID3" {
-                let mut header = [0u8; 6];
-                if file.read_exact(&mut header).is_ok() {
-                    let mut size = ((header[2] as u64) << 21)
-                        | ((header[3] as u64) << 14)
-                        | ((header[4] as u64) << 7)
-                        | (header[5] as u64);
-                    if (header[1] & 0x10) != 0 { size += 10; }
-                    file.seek(SeekFrom::Current(size as i64)).map_err(|e| e.to_string())?;
-                }
-            } else {
-                file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-            }
-
-            let mut sync_buf = [0u8; 4];
-            let mut found = false;
-            if file.read_exact(&mut sync_buf).is_ok() {
-                if &sync_buf == b"fLaC" {
-                    found = true;
-                    file.seek(SeekFrom::Current(-4)).unwrap();
-                } else {
-                    let mut search_limit = 1024 * 1024;
-                    let mut ring = sync_buf;
-                    let mut byte = [0u8; 1];
-                    while search_limit > 0 && file.read_exact(&mut byte).is_ok() {
-                        ring[0] = ring[1];
-                        ring[1] = ring[2];
-                        ring[2] = ring[3];
-                        ring[3] = byte[0];
-                        if &ring == b"fLaC" {
-                            found = true;
-                            file.seek(SeekFrom::Current(-4)).unwrap();
-                            break;
-                        }
-                        search_limit -= 1;
-                    }
-                }
-            }
-
-            if !found {
-                return Err("Bukan file FLAC yang valid (tanda 'fLaC' tidak ditemukan)".into());
-            }
-
-            let mut reader = FlacReader::new(file).map_err(|e| format!("FLAC parse error: {}", e))?;
-            let info    = reader.streaminfo();
-            let max_val = (1u64 << (info.bits_per_sample - 1)) as f32;
-
             use std::io::{Write, BufWriter};
+
+            let file = std::fs::File::open(&path).map_err(|e| format!("Gagal buka file: {}", e))?;
+            let mss = symphonia::core::io::MediaSourceStream::new(Box::new(file), Default::default());
+
+            let mut hint = symphonia::core::probe::Hint::new();
+            if let Some(ext) = path.rsplit('.').next() {
+                hint.with_extension(ext);
+            }
+
+            let probed = symphonia::default::get_probe()
+                .format(
+                    &hint, mss,
+                    &symphonia::core::formats::FormatOptions::default(),
+                    &symphonia::core::meta::MetadataOptions::default(),
+                )
+                .map_err(|e| format!("Format tidak dikenali: {}", e))?;
+
+            let mut format = probed.format;
+            let track = format.tracks().iter()
+                .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+                .ok_or_else(|| "Tidak ada audio track di file ini".to_string())?;
+
+            let mut decoder = symphonia::default::get_codecs()
+                .make(&track.codec_params, &symphonia::core::codecs::DecoderOptions::default())
+                .map_err(|e| format!("Codec tidak didukung: {}", e))?;
+
+            let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+            let channels    = track.codec_params.channels.map(|c| c.count()).unwrap_or(2) as u16;
+
             let temp_file = tempfile::tempfile().map_err(|e| e.to_string())?;
             let mut writer = BufWriter::with_capacity(1024 * 1024, temp_file);
-            let mut samples_len = 0;
+            let mut samples_len = 0usize;
 
-            let mut chunk = Vec::with_capacity(8192);
-            for sample in reader.samples().filter_map(|s| s.ok()) {
-                chunk.push(sample as f32 / max_val);
-                if chunk.len() >= 8192 {
-                    writer.write_all(bytemuck::cast_slice(&chunk)).map_err(|e| e.to_string())?;
-                    samples_len += chunk.len();
-                    chunk.clear();
+            loop {
+                let packet = match format.next_packet() {
+                    Ok(p) => p,
+                    // End of stream — normal termination
+                    Err(symphonia::core::errors::Error::IoError(ref e))
+                        if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(symphonia::core::errors::Error::ResetRequired) => {
+                        decoder.reset();
+                        continue;
+                    },
+                    Err(_) => break,
+                };
+
+                match decoder.decode(&packet) {
+                    Ok(decoded) => {
+                        // ✅ FIX: Buat SampleBuffer baru per-paket dengan kapasitas TEPAT
+                        // dari decoded.frames() — bukan decoded.capacity().
+                        // Ini mencegah assert!-panic ketika FLAC punya variable block size.
+                        let spec     = *decoded.spec();
+                        let n_frames = decoded.frames() as u64;
+                        if n_frames == 0 { continue; }
+
+                        let mut sample_buf =
+                            symphonia::core::audio::SampleBuffer::<f32>::new(n_frames, spec);
+                        sample_buf.copy_interleaved_ref(decoded);
+
+                        let samples = sample_buf.samples();
+                        writer.write_all(bytemuck::cast_slice(samples))
+                            .map_err(|e| e.to_string())?;
+                        samples_len += samples.len();
+                    },
+                    Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                    Err(_) => break,
                 }
             }
-            if !chunk.is_empty() {
-                writer.write_all(bytemuck::cast_slice(&chunk)).map_err(|e| e.to_string())?;
-                samples_len += chunk.len();
+
+            if samples_len == 0 {
+                return Err("File berhasil dibuka tapi tidak ada sampel audio yang bisa dibaca".to_string());
             }
 
             writer.flush().map_err(|e| e.to_string())?;
             let temp_file = writer.into_inner().map_err(|e| e.to_string())?;
-
-            let mmap = unsafe { memmap2::MmapOptions::new().map(&temp_file) }.map_err(|e| e.to_string())?;
+            let mmap = unsafe { memmap2::MmapOptions::new().map(&temp_file) }
+                .map_err(|e| e.to_string())?;
 
             Ok(Arc::new(AudioData {
                 mmap: Some(mmap),
                 samples_len,
-                sample_rate: info.sample_rate,
-                channels:    info.channels as u16,
+                sample_rate,
+                channels,
             }))
         })();
 
@@ -102,13 +108,27 @@ pub fn play_audio(path: String, state: tauri::State<'_, AppState>) -> Result<(),
                 *audio_data.lock().unwrap() = data;
                 play_pos.store(0, Ordering::Relaxed);
                 is_playing.store(true, Ordering::Relaxed);
-                println!("Loaded: {}", path);
+                // Clear error on success
+                *last_decode_error.lock().unwrap() = None;
+                println!("✅ Audio loaded: {}", path);
             }
-            Err(e) => eprintln!("Load error: {e}"),
+            Err(e) => {
+                eprintln!("❌ Load error for {}: {}", path, e);
+                // Store error so UI can poll and show toast
+                *last_decode_error.lock().unwrap() = Some(e);
+            }
         }
     });
 
     Ok(())
+}
+
+/// UI polls this after calling play_audio.
+/// Returns Some(error_message) if decode failed, None if ok or still loading.
+/// Calling this CONSUMES the error (clears it), so toast is shown only once.
+#[tauri::command]
+pub fn get_decode_status(state: tauri::State<'_, AppState>) -> Option<String> {
+    state.last_decode_error.lock().unwrap().take()
 }
 
 #[tauri::command]
@@ -171,15 +191,15 @@ pub fn get_meter_levels(state: tauri::State<'_, AppState>) -> [f32; 4] {
 }
 
 #[tauri::command]
-pub fn get_playback_info(state: tauri::State<'_, AppState>) -> (bool, u64, u64) {
+pub fn get_playback_info(state: tauri::State<'_, AppState>) -> (bool, u64, u64, u32) {
     let playing = state.is_playing.load(Ordering::Relaxed);
     let pos     = state.play_pos.load(Ordering::Relaxed);
-    let total   = {
+    let (total, sample_rate) = {
         let d  = state.audio_data.lock().unwrap();
         let ch = d.channels.max(1) as u64;
-        d.samples_len as u64 / ch
+        (d.samples_len as u64 / ch, d.sample_rate)
     };
-    (playing, pos, total)
+    (playing, pos, total, sample_rate)
 }
 
 #[tauri::command]
@@ -194,4 +214,19 @@ pub fn get_oscilloscope_data(state: tauri::State<'_, AppState>) -> (Vec<f32>, Ve
         right.push(r);
     }
     (left, right)
+}
+
+#[tauri::command]
+pub fn play_midi_note(note: u8, on: bool, state: tauri::State<'_, AppState>) {
+    let event = if on {
+        MidiEvent::NoteOn(note)
+    } else {
+        MidiEvent::NoteOff(note)
+    };
+    let _ = state.midi_tx.send(event);
+}
+
+#[tauri::command]
+pub fn update_midi_bypass(bypassed: bool, state: tauri::State<'_, AppState>) {
+    let _ = state.midi_tx.send(MidiEvent::SetBypass(bypassed));
 }
