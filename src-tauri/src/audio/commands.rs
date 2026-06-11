@@ -146,18 +146,18 @@ pub fn read_android_dir(path: String) -> Result<Vec<AudioFile>, String> {
     for entry in dir {
         if let Ok(entry) = entry {
             let path_buf = entry.path();
-            let is_dir = path_buf.is_dir();
             
-            let ext = path_buf.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-            // Hanya masukkan folder, atau file audio yang kita dukung
-            if is_dir || ext == "flac" || ext == "mp3" || ext == "wav" || ext == "m4a" || ext == "ogg" || ext == "aac" {
-                if let Some(name) = path_buf.file_name().and_then(|n| n.to_str()) {
-                    files.push(AudioFile {
-                        name: name.to_string(),
-                        path: path_buf.to_string_lossy().to_string(),
-                        is_dir,
-                    });
-                }
+            // Gunakan file_type bawaan OS (lebih handal di Android) daripada mengecek path
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            
+            // let ext = path_buf.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            // Tampilkan SEMUA file (hapus filter ketat) karena Symphonia bisa auto-probe formatnya
+            if let Some(name) = path_buf.file_name().and_then(|n| n.to_str()) {
+                files.push(AudioFile {
+                    name: name.to_string(),
+                    path: path_buf.to_string_lossy().to_string(),
+                    is_dir,
+                });
             }
         }
     }
