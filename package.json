@@ -2,7 +2,7 @@
   "name": "fl_eq_studio",
   "version": "1.0.0",
   "scripts": {
-    "dev": "vite ui --port 5173",
+    "dev": "vite ui --port 5173 --host",
     "tauri": "tauri"
   },
   "devDependencies": {

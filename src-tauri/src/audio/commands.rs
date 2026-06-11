@@ -131,6 +131,49 @@ pub fn get_decode_status(state: tauri::State<'_, AppState>) -> Option<String> {
     state.last_decode_error.lock().unwrap().take()
 }
 
+#[derive(serde::Serialize)]
+pub struct AudioFile {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[tauri::command]
+pub fn read_android_dir(path: String) -> Result<Vec<AudioFile>, String> {
+    let mut files = Vec::new();
+    let dir = std::fs::read_dir(&path).map_err(|e| format!("Gagal membaca folder {}: {}", path, e))?;
+    
+    for entry in dir {
+        if let Ok(entry) = entry {
+            let path_buf = entry.path();
+            let is_dir = path_buf.is_dir();
+            
+            let ext = path_buf.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            // Hanya masukkan folder, atau file audio yang kita dukung
+            if is_dir || ext == "flac" || ext == "mp3" || ext == "wav" || ext == "m4a" || ext == "ogg" || ext == "aac" {
+                if let Some(name) = path_buf.file_name().and_then(|n| n.to_str()) {
+                    files.push(AudioFile {
+                        name: name.to_string(),
+                        path: path_buf.to_string_lossy().to_string(),
+                        is_dir,
+                    });
+                }
+            }
+        }
+    }
+    
+    // Sort directories first, then alphabetically
+    files.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir) // true comes first
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+    
+    Ok(files)
+}
+
 #[tauri::command]
 pub fn pause_audio(state: tauri::State<'_, AppState>) {
     let prev = state.is_playing.load(Ordering::Relaxed);

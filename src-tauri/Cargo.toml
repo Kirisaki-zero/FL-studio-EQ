@@ -5,6 +5,10 @@ edition     = "2021"
 description = "High-resolution audio signal analyzer with FFT and THD calculation"
 default-run = "fl_eq_studio"
 
+[lib]
+name = "audio_analyzer"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 symphonia           = { version = "0.5.4", features = ["all"] }
 cpal                = "0.15"
